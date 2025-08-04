@@ -10,37 +10,42 @@ from sklearn.pipeline import Pipeline
 from scipy import stats
 import matplotlib.pyplot as plt
 import requests
+from datetime import datetime, timedelta
+import time
 
-def create_enhanced_features(df, pct_threshold=0.025):
-    """Create comprehensive technical indicators for Bitcoin 2.5% shift prediction."""
+def create_enhanced_features(df, pct_threshold=0.002):
+    """Create comprehensive technical indicators for Bitcoin 15-minute interval prediction."""
     df = df.copy()
     
     # Basic time features
     df['dayofweek'] = df['date'].dt.dayofweek
-    df['month'] = df['date'].dt.month
-    df['quarter'] = df['date'].dt.quarter
+    df['hour'] = df['date'].dt.hour
+    df['minute'] = df['date'].dt.minute
     df['is_weekend'] = (df['dayofweek'] >= 5).astype(int)
     
-    # Price lags and returns
-    for lag in [1, 2, 3, 7, 14]:
+    # Number of 15-min intervals in a day
+    intervals_in_day = 24 * 4
+    
+    # Price lags and returns (scaled for 15-min intervals)
+    for lag in [1, 4, 8, 12, 24, intervals_in_day]:  # 15m, 1h, 2h, 3h, 6h, 1d
         df[f'price_lag_{lag}'] = df['price'].shift(lag)
         df[f'return_{lag}'] = df['price'].pct_change(lag)
     
-    # Moving averages and ratios
-    for window in [5, 10, 20, 50]:
+    # Moving averages and ratios (scaled for 15-min intervals)
+    for window in [12, 24, 48, 96, intervals_in_day * 7]: # 3h, 6h, 12h, 1d, 1w
         df[f'sma_{window}'] = df['price'].rolling(window=window).mean()
         df[f'ema_{window}'] = df['price'].ewm(span=window).mean()
         df[f'price_sma_ratio_{window}'] = df['price'] / df[f'sma_{window}']
         df[f'volatility_{window}'] = df['price'].rolling(window=window).std()
     
-    # MACD indicators
-    ema_12 = df['price'].ewm(span=12).mean()
-    ema_26 = df['price'].ewm(span=26).mean()
+    # MACD indicators (scaled for 15-min intervals)
+    ema_12 = df['price'].ewm(span=12).mean() # Standard short-term
+    ema_26 = df['price'].ewm(span=26).mean() # Standard long-term
     df['macd'] = ema_12 - ema_26
     df['macd_signal'] = df['macd'].ewm(span=9).mean()
     df['macd_histogram'] = df['macd'] - df['macd_signal']
     
-    # RSI (Relative Strength Index)
+    # RSI (Relative Strength Index) (scaled)
     def calculate_rsi(prices, window=14):
         delta = prices.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -48,11 +53,11 @@ def create_enhanced_features(df, pct_threshold=0.025):
         rs = gain / loss
         return 100 - (100 / (1 + rs))
     
-    df['rsi_14'] = calculate_rsi(df['price'], 14)
-    df['rsi_7'] = calculate_rsi(df['price'], 7)
+    df['rsi_14'] = calculate_rsi(df['price'], 14) # Standard 14 periods
+    df['rsi_28'] = calculate_rsi(df['price'], 28) # Longer period
     
-    # Bollinger Bands
-    bb_period = 20
+    # Bollinger Bands (scaled)
+    bb_period = 20 # Standard 20 periods
     bb_std = 2
     bb_ma = df['price'].rolling(window=bb_period).mean()
     bb_std_dev = df['price'].rolling(window=bb_period).std()
@@ -61,8 +66,8 @@ def create_enhanced_features(df, pct_threshold=0.025):
     df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / bb_ma
     df['bb_position'] = (df['price'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
     
-    # Price momentum and slopes
-    for period in [7, 14, 21]:
+    # Price momentum and slopes (scaled)
+    for period in [12, 24, 48]: # 3h, 6h, 12h
         df[f'momentum_{period}'] = (df['price'] / df['price'].shift(period) - 1) * 100
         
         # Linear regression slope
@@ -81,16 +86,16 @@ def create_enhanced_features(df, pct_threshold=0.025):
     df['volume_proxy'] = df['price'].rolling(window=20).std()
     df['price_volume_trend'] = df['price'] * df['volume_proxy']
     
-    # Support/Resistance levels
-    for window in [5, 10, 20]:
+    # Support/Resistance levels (scaled)
+    for window in [24, 48, 96]: # 6h, 12h, 1d
         df[f'resistance_{window}'] = df['price'].rolling(window=window).max()
         df[f'support_{window}'] = df['price'].rolling(window=window).min()
         df[f'price_position_{window}'] = (df['price'] - df[f'support_{window}']) / (df[f'resistance_{window}'] - df[f'support_{window}'])
     
-    # Trend indicators
-    df['price_trend_5'] = np.where(df['price'] > df['sma_5'], 1, 0)
-    df['price_trend_20'] = np.where(df['price'] > df['sma_20'], 1, 0)
-    df['trend_strength'] = df['price_trend_5'] + df['price_trend_20']
+    # Trend indicators (scaled)
+    df['price_trend_12'] = np.where(df['price'] > df['sma_12'], 1, 0)
+    df['price_trend_48'] = np.where(df['price'] > df['sma_48'], 1, 0)
+    df['trend_strength'] = df['price_trend_12'] + df['price_trend_48']
     
     # Classification target
     df['future_price'] = df['price'].shift(-1)
@@ -101,20 +106,45 @@ def create_enhanced_features(df, pct_threshold=0.025):
     
     return df.dropna()
 
-def fetch_bitcoin_data():
-    """Fetch Bitcoin price data from Coinbase API."""
+def fetch_bitcoin_data(days=90, interval_minutes=15):
+    """Fetch Bitcoin price data from Coinbase API for a given number of days and interval."""
     try:
-        url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
-        params = {"granularity": 86400}
+        granularity = interval_minutes * 60  # Convert minutes to seconds
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(days=days)
         
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
+        all_data = []
         
-        data = response.json()
-        if not data:
-            raise ValueError("No data received")
+        # Coinbase API has a limit of 300 candles per request
+        while start_time < end_time:
+            request_end_time = start_time + timedelta(seconds=300 * granularity)
+            if request_end_time > end_time:
+                request_end_time = end_time
+
+            url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
+            params = {
+                "granularity": granularity,
+                "start": start_time.isoformat(),
+                "end": request_end_time.isoformat()
+            }
             
-        df = pd.DataFrame(data, columns=["time", "low", "high", "open", "close", "volume"])
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            
+            data = response.json()
+            if not data:
+                break
+            
+            all_data.extend(data)
+            
+            # Move to the next time window
+            start_time = request_end_time + timedelta(seconds=granularity)
+            time.sleep(0.5)  # Rate limit
+
+        if not all_data:
+            raise ValueError("No data received from Coinbase API")
+
+        df = pd.DataFrame(all_data, columns=["time", "low", "high", "open", "close", "volume"])
         df = df.sort_values("time")
         df["date"] = pd.to_datetime(df["time"], unit="s")
         df["price"] = pd.to_numeric(df["close"], errors='coerce')
@@ -123,20 +153,21 @@ def fetch_bitcoin_data():
         
     except Exception as e:
         print(f"API Error: {e}. Using simulated data...")
-        dates = pd.date_range(start="2024-01-01", periods=300, freq='D')
-        prices = np.cumsum(np.random.randn(300) * 1000) + 50000
+        num_points = (days * 24 * 60) // interval_minutes
+        dates = pd.date_range(start=datetime.now() - timedelta(days=days), periods=num_points, freq=f'{interval_minutes}T')
+        prices = np.cumsum(np.random.randn(num_points) * 10) + 50000
         return pd.DataFrame({'date': dates, 'price': prices})
 
 def main():
-    """Enhanced Bitcoin 2.5% shift prediction using scikit-learn ensemble."""
-    print("🚀 Enhanced Bitcoin 2.5% Shift Prediction with Scikit-Learn")
-    print("=" * 60)
+    """Enhanced Bitcoin prediction using scikit-learn ensemble on 15-minute data."""
+    print("🚀 Enhanced Bitcoin 15-Minute Interval Prediction with Scikit-Learn")
+    print("=" * 70)
     
     # Get data and create features
-    df = fetch_bitcoin_data()
-    print(f"📊 Fetched {len(df)} days of Bitcoin data")
+    df = fetch_bitcoin_data(days=90, interval_minutes=15)
+    print(f"📊 Fetched {len(df)} data points of Bitcoin data at 15-minute intervals")
     
-    df = create_enhanced_features(df)
+    df = create_enhanced_features(df, pct_threshold=0.002) # Adjusted threshold for smaller timeframe
     print(f"⚙️  Created {len(df.columns)-3} technical features")  # -3 for date, price, target
     
     # Select features (exclude non-predictive columns)
@@ -149,9 +180,9 @@ def main():
     # Class distribution
     class_dist = y.value_counts().sort_index()
     print(f"\n📈 Class Distribution:")
-    print(f"   Decrease ≥2.5%: {class_dist.get(-1, 0)} ({class_dist.get(-1, 0)/len(y)*100:.1f}%)")
+    print(f"   Decrease ≥0.2%: {class_dist.get(-1, 0)} ({class_dist.get(-1, 0)/len(y)*100:.1f}%)")
     print(f"   No Change: {class_dist.get(0, 0)} ({class_dist.get(0, 0)/len(y)*100:.1f}%)")
-    print(f"   Increase ≥2.5%: {class_dist.get(1, 0)} ({class_dist.get(1, 0)/len(y)*100:.1f}%)")
+    print(f"   Increase ≥0.2%: {class_dist.get(1, 0)} ({class_dist.get(1, 0)/len(y)*100:.1f}%)")
     
     # Time series split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
@@ -205,7 +236,7 @@ def main():
     
     print(f"\n📋 Classification Report:")
     print(classification_report(y_test, y_pred, 
-                              target_names=["Decrease ≥2.5%", "No Change", "Increase ≥2.5%"],
+                              target_names=["Decrease ≥0.2%", "No Change", "Increase ≥0.2%"],
                               labels=[-1, 0, 1], zero_division=0))
     
     # Feature importance from Random Forest
@@ -224,7 +255,7 @@ def main():
     test_df['predicted'] = y_pred
     test_df['confidence'] = confidence
     
-    print(f"\n🎯 Bitcoin 2.5% Shift Predictions:")
+    print(f"\n🎯 Bitcoin 0.2% Shift Predictions:")
     print("=" * 80)
     
     # High confidence predictions
@@ -237,7 +268,7 @@ def main():
         for _, row in high_conf_predictions.iterrows():
             direction = "📈 INCREASE" if row['predicted'] == 1 else "📉 DECREASE"
             timestamp = row['date'].strftime('%Y-%m-%d %H:%M:%S')
-            print(f"   Price ${row['price']:.2f} | {direction} by 2.5% | Confidence: {row['confidence']:.1%} | {timestamp}")
+            print(f"   Price ${row['price']:.2f} | {direction} by 0.2% | Confidence: {row['confidence']:.1%} | {timestamp}")
     else:
         print("⚠️  No high-confidence significant moves predicted")
     
@@ -247,7 +278,7 @@ def main():
         direction_map = {1: "Increase", -1: "Decrease", 0: "No Change"}
         direction = direction_map[row['predicted']]
         timestamp = row['date'].strftime('%Y-%m-%d %H:%M:%S')
-        print(f"Price ${row['price']:.2f} | Confidence: {row['confidence']:.3f} | {direction} by 2.5% {timestamp}")
+        print(f"Price ${row['price']:.2f} | Confidence: {row['confidence']:.3f} | {direction} by 0.2% {timestamp}")
     
     # Cross-validation
     cv_scores = cross_val_score(ensemble, X_train, y_train, cv=5, scoring='accuracy')

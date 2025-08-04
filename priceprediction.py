@@ -1,4 +1,3 @@
-
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier, ExtraTreesClassifier
@@ -20,7 +19,7 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
-def create_features(df, pct_threshold=0.02):
+def create_features(df, pct_threshold=0.01):
     """Create comprehensive technical indicators and ML features for Bitcoin price prediction."""
     df = df.copy()  # Avoid modifying original DataFrame
     
@@ -218,7 +217,7 @@ def create_features(df, pct_threshold=0.02):
         df['tx_per_dollar'] = df['transaction_count'] / df['price']
         df['tx_efficiency'] = df['tx_per_dollar'] / df['tx_per_dollar'].rolling(window=30).mean()
     
-    # Classification target: 1 if price increases >=2.0% next day, -1 if decreases <=-2.0%, 0 otherwise
+    # Classification target: 1 if price increases >=1.0% next day, -1 if decreases <=-1.0%, 0 otherwise
     df['future_price'] = df['price'].shift(-1)
     df['pct_change'] = (df['future_price'] - df['price']) / df['price']
     df['target'] = 0
@@ -294,7 +293,7 @@ def fetch_blockchain_data():
             
         # Fetch historical transaction count data (simplified approach)
         # Using blockchain.info API for historical data
-        blockchain_info_url = "https://api.blockchain.info/charts/n-transactions?timespan=30days&format=json"
+        blockchain_info_url = "https://api.blockchain.info/charts/n-transactions?timespan=180days&format=json"
         blockchain_response = requests.get(blockchain_info_url, timeout=15)
         
         historical_txns = []
@@ -330,8 +329,8 @@ def fetch_blockchain_data():
         else:
             # Fallback: Generate simulated blockchain data
             print("   ⚠️  Using simulated blockchain data")
-            dates = pd.date_range(start=datetime.now() - timedelta(days=30), periods=30, freq='D')
-            tx_counts = np.random.normal(300000, 50000, 30).astype(int)  # Typical BTC daily tx count
+            dates = pd.date_range(start=datetime.now() - timedelta(days=180), periods=180, freq='D')
+            tx_counts = np.random.normal(300000, 50000, 180).astype(int)  # Typical BTC daily tx count
             
             df_blockchain = pd.DataFrame({
                 'date': dates.date,
@@ -353,15 +352,15 @@ def fetch_blockchain_data():
     except Exception as e:
         print(f"   ❌ Error fetching blockchain data: {e}")
         # Return minimal simulated data
-        dates = pd.date_range(start=datetime.now() - timedelta(days=30), periods=30, freq='D')
-        tx_counts = np.random.normal(300000, 50000, 30).astype(int)
+        dates = pd.date_range(start=datetime.now() - timedelta(days=180), periods=180, freq='D')
+        tx_counts = np.random.normal(300000, 50000, 180).astype(int)
         
         return pd.DataFrame({
             'date': dates.date,
             'transaction_count': tx_counts,
-            'tx_variance': np.random.uniform(-0.1, 0.1, 30),
-            'mempool_congestion': np.random.uniform(0, 1, 30),
-            'estimated_conf_time': np.random.uniform(10, 240, 30)  # minutes
+            'tx_variance': np.random.uniform(-0.1, 0.1, 180),
+            'mempool_congestion': np.random.uniform(0, 1, 180),
+            'estimated_conf_time': np.random.uniform(10, 240, 180)  # minutes
         })
 
 
@@ -475,19 +474,23 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
 
 
 def main():
-    """Advanced ML-powered Bitcoin 2.0% price prediction system with blockchain analysis."""
-    print("🚀 Advanced ML Bitcoin 2.0% Price Prediction System")
+    """Advanced ML-powered Bitcoin 1.0% price prediction system with blockchain analysis."""
+    print("--- SCRIPT EXECUTION STARTED ---")
+    print("🚀 Advanced ML Bitcoin 1.0% Price Prediction System")
     print("🔗 Including Blockchain Transaction & Mempool Analysis")
     print("=" * 70)
     
+    print("--- FETCHING PRICE DATA ---")
     # Fetch price data
     df_price = fetch_bitcoin_futures_data()
     print(f"📊 Raw price data: {len(df_price)} days of Bitcoin prices")
     
+    print("--- FETCHING BLOCKCHAIN DATA ---")
     # Fetch blockchain data
     df_blockchain = fetch_blockchain_data()
     print(f"🔗 Blockchain data: {len(df_blockchain)} days of transaction data")
     
+    print("--- MERGING DATA ---")
     # Merge price and blockchain data
     df = merge_price_and_blockchain_data(df_price, df_blockchain)
     print(f"🔄 Combined dataset: {len(df)} days")
@@ -550,6 +553,7 @@ def main():
         else:
             print(f"   ➡️  WEAK correlation between transaction variance and price")
     
+    print("--- CREATING FEATURES ---")
     # Create enhanced features including blockchain data
     df = create_features(df)
     print(f"⚙️  Enhanced dataset: {len(df)} samples with {len(df.columns)-4} ML features")
@@ -596,18 +600,20 @@ def main():
     X_training = X_training.fillna(0)  # Fill any remaining NaN with 0
     X_latest = X_latest.fillna(0)
     
+    print("--- CHECKING CLASS DISTRIBUTION ---")
     # Check class distribution
     class_counts = y_training.value_counts().sort_index()
     print(f"\n📈 Target Class Distribution:")
-    print(f"   📉 Decrease ≥2.0%: {class_counts.get(-1, 0):3d} ({class_counts.get(-1, 0)/len(y_training)*100:5.1f}%)")
+    print(f"   📉 Decrease ≥1.0%: {class_counts.get(-1, 0):3d} ({class_counts.get(-1, 0)/len(y_training)*100:5.1f}%)")
     print(f"   ➡️  No Change:     {class_counts.get(0, 0):3d} ({class_counts.get(0, 0)/len(y_training)*100:5.1f}%)")
-    print(f"   📈 Increase ≥2.0%: {class_counts.get(1, 0):3d} ({class_counts.get(1, 0)/len(y_training)*100:5.1f}%)")
+    print(f"   📈 Increase ≥1.0%: {class_counts.get(1, 0):3d} ({class_counts.get(1, 0)/len(y_training)*100:5.1f}%)")
     
     # Time series split for proper backtesting
     X_train, X_test, y_train, y_test = train_test_split(X_training, y_training, test_size=0.25, shuffle=False)
     
     print(f"\n🔄 Training Set: {len(X_train)} samples | Test Set: {len(X_test)} samples")
     
+    print("--- PERFORMING FEATURE SELECTION ---")
     # Feature selection using statistical tests
     print("\n🎯 Performing feature selection...")
     k_best = min(75, len(feature_columns))  # Increased to accommodate blockchain features
@@ -695,6 +701,7 @@ def main():
     model_scores = {}
     trained_models = {}
     
+    print("\n--- TRAINING INDIVIDUAL MODELS ---")
     print("\n📊 Training Individual Models:")
     print("-" * 50)
     
@@ -722,6 +729,7 @@ def main():
         print(f"CV: {cv_scores.mean():.3f}±{cv_scores.std():.3f} | Test: {test_accuracy:.3f}")
     
     # Create ensemble model
+    print(f"\n--- CREATING ENSEMBLE MODEL ---")
     print(f"\n🎭 Creating Ensemble Model...")
     
     # Select best performing models for ensemble
@@ -748,7 +756,8 @@ def main():
     print(f"   📊 Using top {len(ensemble_estimators)} models: {[name for name, _ in ensemble_estimators]}")
     
     # NEXT MOVE PREDICTION - The main goal!
-    print(f"\n🔮 PREDICTING NEXT 2.0% BITCOIN MOVE:")
+    print(f"\n--- PREDICTING NEXT MOVE ---")
+    print(f"\n🔮 PREDICTING NEXT 1.0% BITCOIN MOVE:")
     print("=" * 80)
     
     # Make prediction on latest data
@@ -766,9 +775,9 @@ def main():
     direction = direction_map[next_prediction]
     emoji = direction_emoji[direction]
     
-    # Calculate target prices for 2.0% moves
-    target_price_up = current_price * 1.02
-    target_price_down = current_price * 0.98
+    # Calculate target prices for 1.0% moves
+    target_price_up = current_price * 1.01
+    target_price_down = current_price * 0.99
     
     print(f"🎯 NEXT MOVE PREDICTION:")
     print(f"   Current Price: ${current_price:,.2f}")
@@ -777,10 +786,10 @@ def main():
     print(f"   🎯 Confidence Score: {next_confidence:.1%}")
     
     if next_prediction == 1:
-        print(f"   📈 Target Price (2.0% up): ${target_price_up:,.2f}")
+        print(f"   📈 Target Price (1.0% up): ${target_price_up:,.2f}")
         print(f"   💰 Expected Gain: ${target_price_up - current_price:,.2f}")
     elif next_prediction == -1:
-        print(f"   📉 Target Price (2.0% down): ${target_price_down:,.2f}")
+        print(f"   📉 Target Price (1.0% down): ${target_price_down:,.2f}")
         print(f"   ⚠️  Expected Loss: ${current_price - target_price_down:,.2f}")
     else:
         print(f"   ➡️  Price expected to stay between ${target_price_down:,.2f} and ${target_price_up:,.2f}")
@@ -851,7 +860,7 @@ def main():
     next_date = current_date + pd.Timedelta(days=1)
     timestamp = next_date.strftime('%Y-%m-%d %H:%M:%S')
     
-    print(f"Price ${current_price:.2f} | Predicted Price: TBD | {direction} by 2.0% {timestamp}")
+    print(f"Price ${current_price:.2f} | Predicted Price: TBD | {direction} by 1.0% {timestamp}")
     print(f"Confidence: {next_confidence:.1%} | Ensemble of {len(ensemble_estimators)} models")
     print(f"Blockchain-Enhanced Prediction | {len(selected_blockchain_features)} network features")
     
@@ -869,6 +878,7 @@ def main():
     print(f"   🔗 Blockchain: {len(selected_blockchain_features)} network activity features")
     print(f"   🏆 Best Validation Accuracy: {max(score['test_accuracy'] for score in model_scores.values()):.3f}")
     
+    print("--- SCRIPT EXECUTION FINISHED ---")
     return ensemble, selected_features, next_prediction, next_confidence, current_price
 
 
