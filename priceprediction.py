@@ -230,30 +230,74 @@ def create_features(df, pct_threshold=0.01):
 
 # Fetch historical BTC-USD daily prices from Coinbase API
 def fetch_bitcoin_futures_data():
-    """Fetch historical BTC-USD daily prices from Coinbase API with error handling."""
+    """
+    Fetch the last 60,000 1-minute BTC-USD data points from Coinbase API,
+    then resample to daily closing prices to match the rest of the analysis pipeline.
+    """
+    print("Fetching last 60,000 1-minute data points...")
+    all_data = []
+    total_points_to_fetch = 60000
+    points_per_request = 300  # Coinbase API limit per request
+    num_requests = total_points_to_fetch // points_per_request
+    
+    url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
+    # Start from the current time and go backwards
+    end_time = datetime.utcnow()
+
     try:
-        url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
-        params = {"granularity": 86400}  # 1 day
-        
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        if not data:
-            raise ValueError("No data received from Coinbase API")
+        for i in range(num_requests):
+            # Calculate the start time for this chunk
+            # The API takes times in ISO 8601 format
+            start_time = end_time - timedelta(minutes=points_per_request)
             
-        # Convert to DataFrame and process
-        candles = pd.DataFrame(data, columns=["time", "low", "high", "open", "close", "volume"])
-        candles = candles.sort_values("time")
+            params = {
+                "granularity": 60,  # 60 seconds = 1 minute
+                "start": start_time.isoformat(),
+                "end": end_time.isoformat()
+            }
+            
+            print(f"Request {i+1}/{num_requests}: Fetching data from {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}")
+            
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data:
+                print("   No more data available from API.")
+                break
+            
+            all_data.extend(data)
+            
+            # The timestamp of the oldest candle becomes the end_time for the next request
+            # This allows us to paginate backwards in time
+            oldest_timestamp = data[-1][0]
+            end_time = datetime.fromtimestamp(oldest_timestamp)
+
+            time.sleep(0.5) # Add a delay to respect API rate limits
+
+        if not all_data:
+            raise ValueError("No data received from Coinbase API")
+
+        # Convert raw list of lists to a DataFrame
+        candles = pd.DataFrame(all_data, columns=["time", "low", "high", "open", "close", "volume"])
+        # Sort by time, remove any duplicates, and sort again
+        candles = candles.sort_values("time", ascending=False).drop_duplicates(subset=['time']).sort_values("time")
+        
         candles["date"] = pd.to_datetime(candles["time"], unit="s")
         candles["price"] = pd.to_numeric(candles["close"], errors='coerce')
         
-        df = candles[["date", "price"]].copy()
-        df = df.dropna()  # Remove any invalid prices
+        print(f"Successfully fetched {len(candles)} unique 1-minute data points.")
         
-        print(f"Fetched {len(df)} days of BTC price data")
-        return df
+        # --- RESAMPLING TO DAILY DATA ---
+        # The rest of the script (features, blockchain data) is based on a daily timeframe.
+        # We resample the 1-minute data to daily data to ensure compatibility.
+        print("Resampling 1-minute data to daily closing prices...")
+        candles.set_index('date', inplace=True)
+        daily_df = candles['price'].resample('D').last().dropna().to_frame().reset_index()
         
+        print(f"Resampled to {len(daily_df)} days of BTC price data.")
+        return daily_df
+
     except Exception as e:
         print(f"Error fetching data: {e}")
         # Fallback to simulated data for testing
