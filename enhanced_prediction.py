@@ -1,20 +1,46 @@
-import numpy as np
-import pandas as pd
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-from sklearn.linear_model import LogisticRegression
-from sklearn.svm import SVC
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
-from scipy import stats
-import matplotlib.pyplot as plt
-import requests
+# Optional heavy dependencies are imported lazily to allow module import without them.
+try:
+    import numpy as np
+except Exception:
+    np = None
+try:
+    import pandas as pd
+except Exception:
+    pd = None
+try:
+    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+    from sklearn.model_selection import train_test_split, cross_val_score
+    from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.svm import SVC
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import Pipeline
+except Exception:
+    RandomForestClassifier = GradientBoostingClassifier = VotingClassifier = None
+    train_test_split = cross_val_score = None
+    classification_report = confusion_matrix = accuracy_score = None
+    LogisticRegression = SVC = None
+    StandardScaler = None
+    Pipeline = None
+try:
+    from scipy import stats
+except Exception:
+    stats = None
+# matplotlib is not required for core functionality; avoid importing to reduce dependency surface
+try:
+    import requests
+except Exception:
+    requests = None
 from datetime import datetime, timedelta
 import time
 
 def create_enhanced_features(df, pct_threshold=0.002):
-    """Create comprehensive technical indicators for Bitcoin 1-minute interval prediction."""
+    """Create comprehensive technical indicators for Bitcoin 1-minute interval prediction.
+    Requires numpy, pandas, and scipy.stats. Raises ImportError if unavailable.
+    """
+    if pd is None or np is None or stats is None:
+        raise ImportError("create_enhanced_features requires numpy, pandas, and scipy to be installed.")
+
     df = df.copy()
     
     # Basic time features
@@ -107,7 +133,13 @@ def create_enhanced_features(df, pct_threshold=0.002):
     return df.dropna()
 
 def fetch_bitcoin_data(num_points=36000, interval_minutes=1):
-    """Fetch a specific number of Bitcoin price data points from Coinbase API."""
+    """Fetch a specific number of Bitcoin price data points from Coinbase API.
+    Falls back to simulated data on any error or if 'requests' is unavailable.
+    Requires pandas and numpy when returning data.
+    """
+    if pd is None or np is None:
+        raise ImportError("fetch_bitcoin_data requires numpy and pandas to be installed.")
+
     print(f"Fetching last {num_points} {interval_minutes}-minute data points...")
     all_data = []
     points_per_request = 300  # Coinbase API limit per request
@@ -118,6 +150,8 @@ def fetch_bitcoin_data(num_points=36000, interval_minutes=1):
     end_time = datetime.utcnow()
 
     try:
+        if requests is None:
+            raise RuntimeError("'requests' library not available")
         for i in range(num_requests):
             start_time = end_time - timedelta(minutes=points_per_request * interval_minutes)
             
