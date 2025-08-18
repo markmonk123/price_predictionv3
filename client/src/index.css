@@ -1,0 +1,126 @@
+body {
+  margin: 0;
+  font-family: 'Roboto', 'Helvetica', 'Arial', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #f5f7fa;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+
+/* Utility classes */
+.positive-value {
+  color: #4caf50;
+}
+
+.negative-value {
+  color: #f44336;
+}
+
+/* Animation classes */
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.pulse {
+  animation: pulse 1.5s infinite ease-in-out;
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(30px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.slide-in-right {
+  animation: slideInRight 0.3s forwards;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.5s forwards;
+}
+
+/* Fix Trading Protocol specific styles */
+.fix-message {
+  font-family: 'Courier New', monospace;
+  font-size: 0.85rem;
+  padding: 12px;
+  border-radius: 4px;
+  background-color: #f5f5f5;
+  overflow-x: auto;
+  margin: 8px 0;
+  line-height: 1.4;
+}
+
+.fix-tag {
+  color: #2196f3;
+  font-weight: bold;
+}
+
+.fix-value {
+  color: #4caf50;
+}
+
+.fix-delimiter {
+  color: #9e9e9e;
+}
+
+/* Chart styles */
+.chart-container {
+  position: relative;
+  height: 100%;
+  width: 100%;
+}
+
+.tooltip {
+  background-color: rgba(255, 255, 255, 0.9);
+  border-radius: 4px;
+  padding: 8px 12px;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.15);
+  font-size: 0.75rem;
+  z-index: 1000;
+}
