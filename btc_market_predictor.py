@@ -3,59 +3,56 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
-from coinbase.rest import RESTClient
+import requests
 from scipy import stats
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_percentage_error
 
 
 def fetch_btc_data(num_points: int = 26000, interval_minutes: int = 15) -> pd.DataFrame:
-    """Fetch historical BTC-USD candles using the Coinbase SDK.
+    """Fetch historical BTC-USD candles using Coinbase public API.
 
     Returns a DataFrame with columns: date, open, high, low, close.
     Falls back to synthetic data on failure.
     """
-    client = RESTClient()
-    all_data: list[dict] = []
+    all_data = []
     points_per_request = 300  # Coinbase API limit per request
     num_requests = (num_points + points_per_request - 1) // points_per_request
 
-    # Coinbase's market data endpoint expects UNIX seconds and 15-minute alignment
-    granularity = "FIFTEEN_MINUTE"
+    # Coinbase API expects ISO8601 times and granularity in seconds
+    granularity = interval_minutes * 60
     end_time = datetime.utcnow()
     end_time -= timedelta(
         minutes=end_time.minute % interval_minutes,
         seconds=end_time.second,
         microseconds=end_time.microsecond,
     )
-    url = f"https://{client.base_url}/api/v3/brokerage/market/products/BTC-USD/candles"
+    url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
 
     try:
         for _ in range(num_requests):
             start_time = end_time - timedelta(minutes=points_per_request * interval_minutes)
             params = {
-                "start": str(int(start_time.timestamp())),
-                "end": str(int(end_time.timestamp())),
+                "start": start_time.isoformat(),
+                "end": end_time.isoformat(),
                 "granularity": granularity,
-                "limit": points_per_request,
             }
-            resp = client.session.get(url, params=params, timeout=client.timeout)
+            resp = requests.get(url, params=params, timeout=10)
             resp.raise_for_status()
-            data = resp.json().get("candles", [])
+            data = resp.json()
             if not data:
                 break
             all_data.extend(data)
-            oldest = int(data[-1]["start"])
+            # Coinbase returns [time, low, high, open, close, volume]
+            oldest = data[-1][0]
             end_time = datetime.fromtimestamp(oldest)
             time.sleep(0.2)
         if not all_data:
             raise ValueError("no data fetched")
-        df = pd.DataFrame(all_data)
+        df = pd.DataFrame(all_data, columns=["start", "low", "high", "open", "close", "volume"])
         df = df.drop_duplicates("start").sort_values("start")
         df["date"] = pd.to_datetime(df["start"].astype(int), unit="s")
-        df[["open", "high", "low", "close"]] = df[
-            ["open", "high", "low", "close"]
-        ].astype(float)
+        df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
         return df[["date", "open", "high", "low", "close"]].reset_index(drop=True)
     except Exception:
         # fallback synthetic data
