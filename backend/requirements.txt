@@ -1,3 +1,8 @@
 flask
 numpy
+pandas
 scikit-learn
+scipy
+matplotlib
+python-dateutil
+requests

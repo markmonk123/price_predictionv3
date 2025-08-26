@@ -1,0 +1,29 @@
+version: '3.9'
+
+services:
+  backend:
+    build:
+      context: backend
+    ports:
+      - "8000:8000"
+    networks:
+      - app-net
+  prediction:
+    build:
+      context: backend
+    command: ["python", "run_prediction.py", "--price", "50000"]
+    networks:
+      - app-net
+  frontend:
+    build:
+      context: frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    driver: bridge
