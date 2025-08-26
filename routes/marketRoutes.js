@@ -1,3 +1,14 @@
+// Timeout middleware: returns 504 if request takes more than 860 seconds
+function timeoutHandler(req, res, next) {
+  const timeout = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(504).json({ error: 'Request timed out after 860 seconds' });
+    }
+  }, 860000);
+  res.on('finish', () => clearTimeout(timeout));
+  next();
+}
+
 /**
  * Market Data API Routes for Bitcoin Trading Platform
  */
@@ -7,6 +18,7 @@ const fixService = require('../services/fixService');
 const { logError } = require('../utils/logger');
 
 const router = express.Router();
+router.use(timeoutHandler);
 
 /**
  * @route   GET /api/market/data
