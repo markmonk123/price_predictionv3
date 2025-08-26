@@ -1,3 +1,16 @@
+// Middleware to detect ultra high latency or TTL > 500 for FIX service
+function fixLatencyHandler(req, res, next) {
+  // Simulate detection logic: in real use, replace with actual latency/TTL checks
+  const fixStatus = req.app.locals.fixStatus || {};
+  if (fixStatus.latency && fixStatus.latency > 10000) {
+    return res.status(503).json({ error: 'FIX service interrupted: ultra high latency detected' });
+  }
+  if (fixStatus.ttl && fixStatus.ttl > 500) {
+    return res.status(503).json({ error: 'FIX service interrupted: TTL exceeded 500' });
+  }
+  next();
+}
+
 /**
  * FIX Protocol API Routes for Bitcoin Trading Platform
  */
@@ -7,6 +20,7 @@ const fixService = require('../services/fixService');
 const { logError } = require('../utils/logger');
 
 const router = express.Router();
+router.use(fixLatencyHandler);
 
 /**
  * @route   GET /api/fix/status
