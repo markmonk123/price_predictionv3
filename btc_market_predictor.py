@@ -9,8 +9,8 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_percentage_error
 
 
-def fetch_btc_data(num_points: int = 26000, interval_minutes: int = 15) -> pd.DataFrame:
-    """Fetch historical BTC-USD candles using Coinbase public API.
+def fetch_btc_data(num_points: int = 26000, interval_minutes: int = 5) -> pd.DataFrame:
+    """Fetch historical BTC-USD candles using Coinbase public API (5-minute intervals).
 
     Returns a DataFrame with columns: date, open, high, low, close.
     Falls back to synthetic data on failure.
