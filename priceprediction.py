@@ -7,8 +7,6 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.preprocessing import StandardScaler, RobustScaler
-from sklearn.pipeline import Pipeline
 from sklearn.feature_selection import SelectKBest, f_classif
 from scipy import stats
 import matplotlib.pyplot as plt
@@ -794,41 +792,29 @@ def main():
             n_jobs=-1
         ),
         
-        'Logistic Regression': Pipeline([
-            ('scaler', RobustScaler()),
-            ('lr', LogisticRegression(
-                class_weight='balanced',
-                max_iter=2000,
-                C=0.1,
-                random_state=42
-            ))
-        ]),
-        
-        'Support Vector Machine': Pipeline([
-            ('scaler', StandardScaler()),
-            ('svm', SVC(
-                kernel='rbf',
-                class_weight='balanced',
-                probability=True,
-                C=1.0,
-                gamma='scale',
-                random_state=42
-            ))
-        ]),
-        
-        'K-Nearest Neighbors': Pipeline([
-            ('scaler', StandardScaler()),
-            ('knn', KNeighborsClassifier(
-                n_neighbors=15,
-                weights='distance',
-                metric='minkowski'
-            ))
-        ]),
-        
-        'Naive Bayes': Pipeline([
-            ('scaler', StandardScaler()),
-            ('nb', GaussianNB())
-        ])
+        'Logistic Regression': LogisticRegression(
+            class_weight='balanced',
+            max_iter=2000,
+            C=0.1,
+            random_state=42
+        ),
+
+        'Support Vector Machine': SVC(
+            kernel='rbf',
+            class_weight='balanced',
+            probability=True,
+            C=1.0,
+            gamma='scale',
+            random_state=42
+        ),
+
+        'K-Nearest Neighbors': KNeighborsClassifier(
+            n_neighbors=15,
+            weights='distance',
+            metric='minkowski'
+        ),
+
+        'Naive Bayes': GaussianNB()
     }
     
     # Train and evaluate individual models on full training data
