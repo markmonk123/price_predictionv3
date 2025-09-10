@@ -547,6 +547,66 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
 
 
 
+def create_30min_data(df_daily):
+    """Convert daily data to 30-minute intervals using interpolation and noise."""
+    print("🔄 Converting daily data to 30-minute intervals...")
+    
+    # Ensure we have a datetime column
+    df_daily = df_daily.copy()
+    df_daily['date'] = pd.to_datetime(df_daily['date'])
+    
+    # Create 30-minute intervals for the last 7 days to have enough data for 12-hour forecast
+    end_date = df_daily['date'].max()
+    start_date = end_date - timedelta(days=7)
+    
+    # Create 30-minute timestamps
+    timestamps_30min = pd.date_range(
+        start=start_date, 
+        end=end_date, 
+        freq='30min'
+    )
+    
+    # Get the last 7 days of daily data
+    recent_daily = df_daily[df_daily['date'] >= start_date].sort_values('date')
+    
+    if len(recent_daily) == 0:
+        print("   ⚠️  No recent data available, using last available data")
+        recent_daily = df_daily.tail(7)
+    
+    # Create 30-minute dataframe
+    df_30min = pd.DataFrame({'date': timestamps_30min})
+    
+    # Interpolate prices with realistic intraday variation
+    base_prices = np.interp(
+        timestamps_30min.astype(np.int64),
+        recent_daily['date'].astype(np.int64),
+        recent_daily['price']
+    )
+    
+    # Add realistic intraday volatility (smaller than daily volatility)
+    daily_volatility = recent_daily['price'].pct_change().std()
+    intraday_volatility = daily_volatility * 0.3  # 30% of daily volatility for 30-min intervals
+    
+    # Add random walk with intraday patterns
+    random_walk = np.random.normal(0, intraday_volatility, len(timestamps_30min))
+    
+    # Add time-of-day effects (higher volatility during trading hours)
+    hours = timestamps_30min.hour
+    time_effect = 1 + 0.5 * np.sin(2 * np.pi * (hours - 12) / 24)  # Peak around noon
+    
+    # Combine effects
+    price_variations = random_walk * time_effect
+    df_30min['price'] = base_prices * (1 + price_variations)
+    
+    # Ensure prices are positive and reasonable
+    df_30min['price'] = np.maximum(df_30min['price'], base_prices * 0.95)
+    
+    print(f"   ✅ Created {len(df_30min)} 30-minute data points")
+    print(f"   📊 Price range: ${df_30min['price'].min():.2f} - ${df_30min['price'].max():.2f}")
+    
+    return df_30min
+
+
 def main():
     """Advanced ML-powered Bitcoin 1.0% price prediction system with blockchain analysis."""
     print("--- SCRIPT EXECUTION STARTED ---")
@@ -953,6 +1013,53 @@ def main():
     print(f"   🏆 Best Validation Accuracy: {max(score['test_accuracy'] for score in model_scores.values()):.3f}")
     
     print("--- SCRIPT EXECUTION FINISHED ---")
+    
+    # Import and run enhanced forecasting system
+    try:
+        from enhanced_forecasting import run_enhanced_forecasting
+        
+        print("\n" + "="*80)
+        print("🔮 RUNNING ENHANCED FORECASTING SYSTEM")
+        print("="*80)
+        
+        # Convert daily data to 30-minute intervals by interpolation
+        # This simulates having 30-minute data
+        df_30min = create_30min_data(df)
+        
+        # Run enhanced forecasting
+        enhanced_results = run_enhanced_forecasting(df_30min)
+        
+        if enhanced_results:
+            print("\n✅ Enhanced forecasting completed successfully!")
+            
+            # Demonstrate continuous training system
+            try:
+                from continuous_training import run_continuous_training_demo
+                
+                print("\n" + "="*80)
+                print("🔄 STARTING CONTINUOUS TRAINING DEMONSTRATION")
+                print("="*80)
+                print("⏰ Running 3-minute demonstration of continuous model updates...")
+                print("💡 In production, this would run indefinitely with 5-minute intervals")
+                
+                # Run a short demo (3 minutes)
+                continuous_system = run_continuous_training_demo(df_30min, duration_minutes=3)
+                
+                print("\n✅ Continuous training demonstration completed!")
+                
+            except Exception as e:
+                print(f"\n❌ Error running continuous training demo: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        else:
+            print("\n❌ Enhanced forecasting failed")
+            
+    except Exception as e:
+        print(f"\n❌ Error running enhanced forecasting: {e}")
+        import traceback
+        traceback.print_exc()
+    
     return ensemble, selected_features, next_prediction, next_confidence, current_price
 
 
