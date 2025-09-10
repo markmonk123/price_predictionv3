@@ -17,7 +17,246 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
-def create_features(df, pct_threshold=0.01):
+# Import our enhanced modules
+from data_preprocessor import DataPreprocessor, preprocess_data_for_model
+from gpu_optimizer import GPUOptimizer
+
+def enhanced_bitcoin_prediction_with_denormalized_data():
+    """
+    Enhanced Bitcoin price prediction using denormalized data processing
+    and the new decentralized preprocessing system.
+    """
+    print("\n🚀 ENHANCED BITCOIN PRICE PREDICTION WITH DENORMALIZED DATA")
+    print("="*80)
+    
+    # Initialize GPU optimization
+    print("🎮 Setting up GPU optimization...")
+    gpu_optimizer = GPUOptimizer()
+    gpu_results = gpu_optimizer.run_full_optimization()
+    
+    # Initialize the decentralized data preprocessor
+    print("🔧 Initializing decentralized data preprocessor...")
+    preprocessor = DataPreprocessor()
+    
+    # Fetch and process data
+    print("📊 Fetching Bitcoin data...")
+    df = fetch_bitcoin_futures_data()
+    
+    if df is None or len(df) < 100:
+        print("❌ Failed to fetch sufficient data")
+        return None
+    
+    print(f"✅ Fetched {len(df)} data points")
+    
+    # Process data with denormalized preprocessing
+    print("🔄 Processing data with denormalized preprocessing...")
+    processed_df, metadata = preprocessor.prepare_denormalized_data(df)
+    
+    # Validate data integrity
+    integrity_check = preprocessor.validate_data_integrity(processed_df)
+    print(f"🔍 Data integrity check: {'✅ Passed' if integrity_check['validation_passed'] else '❌ Failed'}")
+    
+    if not integrity_check['validation_passed']:
+        print(f"⚠️ Data integrity issues: {integrity_check['issues']}")
+    
+    # Remove rows with NaN targets for training
+    training_data = processed_df.dropna(subset=['target']).copy()
+    latest_data = processed_df.tail(1).copy()  # Keep latest for prediction
+    
+    print(f"\n📊 DATASET OVERVIEW:")
+    print(f"   📈 Total processed samples: {len(processed_df)}")
+    print(f"   🎯 Training samples: {len(training_data)}")
+    print(f"   🔮 Prediction samples: {len(latest_data)}")
+    print(f"   📋 Features: {len(metadata['feature_columns'])}")
+    print(f"   📊 Memory usage: {integrity_check['memory_usage_mb']:.2f} MB")
+    print(f"   🔧 Denormalized: {metadata['denormalized']}")
+    print(f"   🏗️ Structure preserved: {metadata['structure_preserved']}")
+    
+    if len(training_data) < 50:
+        print("❌ Insufficient training data")
+        return None
+    
+    # Prepare features for model training (already denormalized)
+    feature_columns = metadata['feature_columns']
+    print(f"🎯 Using {len(feature_columns)} denormalized features")
+    
+    X_training = training_data[feature_columns]
+    y_training = training_data['target']
+    X_latest = latest_data[feature_columns]
+    
+    # Handle any remaining missing values
+    print("🔧 Final data cleaning...")
+    X_training = X_training.fillna(0)
+    X_latest = X_latest.fillna(0)
+    
+    # Check class distribution
+    class_counts = y_training.value_counts().sort_index()
+    print(f"\n📈 Target Class Distribution:")
+    print(f"   📉 Decrease ≥1.0%: {class_counts.get(-1, 0):3d} ({class_counts.get(-1, 0)/len(y_training)*100:5.1f}%)")
+    print(f"   ➡️  No Change:     {class_counts.get(0, 0):3d} ({class_counts.get(0, 0)/len(y_training)*100:5.1f}%)")
+    print(f"   📈 Increase ≥1.0%: {class_counts.get(1, 0):3d} ({class_counts.get(1, 0)/len(y_training)*100:5.1f}%)")
+    
+    # Time series split for proper validation
+    X_train, X_test, y_train, y_test = train_test_split(X_training, y_training, test_size=0.25, shuffle=False)
+    print(f"🔄 Training Set: {len(X_train)} samples | Test Set: {len(X_test)} samples")
+    
+    # Feature selection (working with denormalized data)
+    print("🎯 Performing feature selection on denormalized data...")
+    k_best = min(50, len(feature_columns))
+    selector = SelectKBest(score_func=f_classif, k=k_best)
+    X_train_selected = selector.fit_transform(X_train, y_train)
+    X_test_selected = selector.transform(X_test)
+    X_latest_selected = selector.transform(X_latest)
+    
+    selected_features = [feature_columns[i] for i in selector.get_support(indices=True)]
+    print(f"✅ Selected {len(selected_features)} most informative denormalized features")
+    
+    # Initialize optimized ML models
+    print("🤖 Initializing ML models with GPU optimization...")
+    
+    # Use GPU-optimized batch sizes if available
+    batch_sizes = gpu_results.get('recommended_batch_sizes', {})
+    n_estimators = batch_sizes.get('medium_model_batch_size', 200)
+    
+    models = {
+        'Random Forest': RandomForestClassifier(
+            n_estimators=n_estimators,
+            max_depth=15,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            class_weight='balanced',
+            random_state=42,
+            n_jobs=-1
+        ),
+        
+        'Gradient Boosting': GradientBoostingClassifier(
+            n_estimators=min(n_estimators, 200),
+            learning_rate=0.1,
+            max_depth=8,
+            subsample=0.8,
+            random_state=42
+        ),
+        
+        'Extra Trees': ExtraTreesClassifier(
+            n_estimators=n_estimators,
+            max_depth=12,
+            min_samples_split=4,
+            class_weight='balanced',
+            random_state=42,
+            n_jobs=-1
+        ),
+        
+        'Logistic Regression': LogisticRegression(
+            class_weight='balanced',
+            max_iter=2000,
+            C=0.1,
+            random_state=42
+        ),
+        
+        'SVM': SVC(
+            kernel='rbf',
+            class_weight='balanced',
+            probability=True,
+            random_state=42
+        ),
+        
+        'K-Nearest Neighbors': KNeighborsClassifier(
+            n_neighbors=7,
+            weights='distance',
+            n_jobs=-1
+        )
+    }
+    
+    # Train and evaluate models with denormalized data
+    print("\n🏋️ Training models with denormalized data...")
+    model_results = {}
+    trained_models = {}
+    
+    for name, model in models.items():
+        print(f"   🔄 Training {name}...")
+        start_time = time.time()
+        
+        try:
+            model.fit(X_train_selected, y_train)
+            training_time = time.time() - start_time
+            
+            # Evaluate on test set
+            test_predictions = model.predict(X_test_selected)
+            test_accuracy = accuracy_score(y_test, test_predictions)
+            
+            # Cross-validation score
+            cv_scores = cross_val_score(model, X_train_selected, y_train, cv=3, scoring='accuracy')
+            cv_mean = cv_scores.mean()
+            cv_std = cv_scores.std()
+            
+            model_results[name] = {
+                'test_accuracy': test_accuracy,
+                'cv_mean': cv_mean,
+                'cv_std': cv_std,
+                'training_time': training_time
+            }
+            
+            trained_models[name] = model
+            
+            print(f"   ✅ {name}: Accuracy = {test_accuracy:.3f}, CV = {cv_mean:.3f}±{cv_std:.3f}, Time = {training_time:.2f}s")
+            
+        except Exception as e:
+            print(f"   ❌ {name}: Training failed - {e}")
+    
+    # Create ensemble with best models
+    print("\n🎯 Creating optimized ensemble...")
+    best_models = sorted(model_results.items(), key=lambda x: x[1]['cv_mean'], reverse=True)[:3]
+    ensemble_models = [(name, trained_models[name]) for name, _ in best_models]
+    
+    ensemble = VotingClassifier(
+        estimators=ensemble_models,
+        voting='soft'
+    )
+    
+    print(f"   🤖 Ensemble models: {[name for name, _ in ensemble_models]}")
+    ensemble.fit(X_train_selected, y_train)
+    
+    # Final ensemble evaluation
+    ensemble_predictions = ensemble.predict(X_test_selected)
+    ensemble_accuracy = accuracy_score(y_test, ensemble_predictions)
+    print(f"   ✅ Ensemble accuracy: {ensemble_accuracy:.3f}")
+    
+    # Generate final prediction on latest data (denormalized)
+    print("\n🔮 Generating prediction with denormalized data...")
+    latest_prediction = ensemble.predict(X_latest_selected)[0]
+    latest_probabilities = ensemble.predict_proba(X_latest_selected)[0]
+    confidence = np.max(latest_probabilities)
+    
+    # Interpret prediction
+    prediction_labels = {-1: "📉 DECREASE ≥1.0%", 0: "➡️ NO SIGNIFICANT CHANGE", 1: "📈 INCREASE ≥1.0%"}
+    prediction_label = prediction_labels[latest_prediction]
+    
+    current_price = latest_data['price'].iloc[0]
+    
+    print(f"\n🎯 FINAL PREDICTION RESULTS:")
+    print(f"   💰 Current Price: ${current_price:.2f}")
+    print(f"   🔮 Prediction: {prediction_label}")
+    print(f"   🎯 Confidence: {confidence:.1%}")
+    print(f"   🤖 Models Used: {len(ensemble_models)}")
+    print(f"   📊 Features Used: {len(selected_features)} (denormalized)")
+    print(f"   ⚡ GPU Optimized: {gpu_results['gpu_info']['cuda_available']}")
+    
+    # Return comprehensive results
+    results = {
+        'prediction': latest_prediction,
+        'prediction_label': prediction_label,
+        'confidence': confidence,
+        'current_price': current_price,
+        'model_results': model_results,
+        'ensemble_accuracy': ensemble_accuracy,
+        'features_used': len(selected_features),
+        'data_denormalized': True,
+        'gpu_optimized': gpu_results['gpu_info']['cuda_available'],
+        'data_integrity': integrity_check['validation_passed'],
+        'preprocessor_metadata': metadata
+    }
+    
+    return results
     """Create comprehensive technical indicators and ML features for Bitcoin price prediction."""
     df = df.copy()  # Avoid modifying original DataFrame
     
