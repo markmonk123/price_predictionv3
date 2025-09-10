@@ -36,7 +36,8 @@ class ContinuousTrainingSystem:
         self.model_pool = {}
         self.training_pool = {}
         self.data_integrity_checks = []
-        
+        self.last_prediction = None  # Store last predicted price for retraining
+
         # Thread pools
         self.executor = ThreadPoolExecutor(max_workers=5)
         self.training_threads = []
@@ -75,23 +76,55 @@ class ContinuousTrainingSystem:
         logger.info("🛑 Stopping Continuous Training System")
         self.is_running = False
         self.executor.shutdown(wait=True)
-        
+
+    def _drop_normalized_fields(self, df):
+        """Remove columns that appear to be normalized or scaled."""
+        if df is None:
+            return df
+
+        drop_cols = []
+        for col in df.columns:
+            if col in {"date", "price"}:
+                continue
+
+            lower = col.lower()
+            if "norm" in lower or "scale" in lower:
+                drop_cols.append(col)
+                continue
+
+            series = df[col].dropna()
+            if not series.empty and series.between(0, 1).all():
+                drop_cols.append(col)
+
+        if drop_cols:
+            logger.warning(f"Removing normalized columns: {drop_cols}")
+            df = df.drop(columns=drop_cols)
+
+        return df
+
     def _data_update_loop(self):
         """Continuously update data every 5 minutes."""
         logger.info("📊 Data update loop started")
-        
+
         while self.is_running:
             try:
                 # Simulate new data arrival
                 new_data = self._generate_new_data_point()
-                
+
                 if new_data is not None:
-                    # Add to existing data
+                    # Drop unexpected normalized fields
+                    new_data = self._drop_normalized_fields(new_data)
+                    self.latest_data = self._drop_normalized_fields(self.latest_data)
+
+                    # Add to existing data and apply smoothing
                     self.latest_data = pd.concat([self.latest_data, new_data], ignore_index=True)
-                    
-                    # Keep only last 7 days of 30-minute data (336 points)
-                    if len(self.latest_data) > 336:
-                        self.latest_data = self.latest_data.tail(336)
+                    self.latest_data['price'] = (
+                        self.latest_data['price'].rolling(window=5, min_periods=1).mean()
+                    )
+
+                    # Keep only last 30000 points of 5-minute data
+                    if len(self.latest_data) > 30000:
+                        self.latest_data = self.latest_data.tail(30000)
                     
                     # Queue for model retraining
                     self.data_queue.put(self.latest_data.copy())
@@ -117,8 +150,8 @@ class ContinuousTrainingSystem:
         last_time = pd.to_datetime(last_point['date'])
         last_price = last_point['price']
         
-        # Generate new timestamp (30 minutes later)
-        new_time = last_time + timedelta(minutes=30)
+        # Generate new timestamp (5 minutes later)
+        new_time = last_time + timedelta(minutes=5)
         
         # Generate new price with random walk
         price_change = np.random.normal(0, 0.01)  # 1% volatility
@@ -145,25 +178,56 @@ class ContinuousTrainingSystem:
                 # Wait for new data
                 if not self.data_queue.empty():
                     new_data = self.data_queue.get(timeout=1)
-                    
+                    new_data = self._drop_normalized_fields(new_data)
+
+                    # Incorporate last prediction and current price
+                    if self.last_prediction is not None and len(new_data) > 30000:
+                        new_data = new_data.tail(30000)
+                    if self.last_prediction is not None and len(new_data) >= 29999:
+                        actual_price = new_data.iloc[-1]['price']
+                        actual_time = pd.to_datetime(new_data.iloc[-1]['date'])
+                        predicted_time = actual_time + timedelta(minutes=5)
+                        historical = new_data.iloc[-(29998+1):-1]
+                        head_rows = pd.DataFrame({
+                            'date': [predicted_time, actual_time],
+                            'price': [self.last_prediction, actual_price]
+                        })
+                        new_data = pd.concat([head_rows, historical], ignore_index=True)
+
                     logger.info(f"🔄 {model_id}: Retraining with {len(new_data)} data points")
-                    
+
+                    # Resample to 30-minute intervals for training
+                    train_data = new_data.copy()
+                    train_data['date'] = pd.to_datetime(train_data['date'])
+                    train_data = (
+                        train_data.resample('30T', on='date').last().dropna().reset_index()
+                    )
+
                     # Retrain models
                     start_time = time.time()
-                    success = forecaster.train_models(new_data)
+                    success = forecaster.train_models(train_data)
                     training_time = time.time() - start_time
-                    
+
                     if success:
                         # Store trained model
                         self.model_pool[model_id] = {
                             'forecaster': forecaster,
                             'training_time': training_time,
-                            'data_size': len(new_data),
+                            'data_size': len(train_data),
                             'timestamp': datetime.now(),
                             'model_id': model_id
                         }
-                        
+
                         logger.info(f"✅ {model_id}: Training completed in {training_time:.2f}s")
+
+                        # Generate and log 12-hour forecast
+                        forecast = forecaster.generate_12_hour_forecast(train_data)
+                        if forecast is not None:
+                            self.last_prediction = forecast['predicted_price'].iloc[0]
+                            for _, row in forecast.iterrows():
+                                logger.info(
+                                    f"🕒 {row['timestamp']}: ${row['predicted_price']:.2f}"
+                                )
                     else:
                         logger.warning(f"⚠️ {model_id}: Training failed")
                     
@@ -203,7 +267,7 @@ class ContinuousTrainingSystem:
         
         # Check for timestamp continuity
         time_diffs = pd.to_datetime(self.latest_data['date']).diff()
-        expected_diff = timedelta(minutes=30)
+        expected_diff = timedelta(minutes=5)
         irregular_intervals = (time_diffs != expected_diff).sum() - 1  # Exclude first NaT
         integrity_report['checks']['regular_intervals'] = irregular_intervals <= 1  # Allow some tolerance
         

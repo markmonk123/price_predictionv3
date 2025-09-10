@@ -13,15 +13,11 @@ try:
     from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
     from sklearn.linear_model import LogisticRegression
     from sklearn.svm import SVC
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.pipeline import Pipeline
 except Exception:
     RandomForestClassifier = GradientBoostingClassifier = VotingClassifier = None
     train_test_split = cross_val_score = None
     classification_report = confusion_matrix = accuracy_score = None
     LogisticRegression = SVC = None
-    StandardScaler = None
-    Pipeline = None
 try:
     from scipy import stats
 except Exception:
@@ -239,24 +235,18 @@ def main():
         n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42
     )
     
-    # Logistic Regression with scaling
-    lr_pipe = Pipeline([
-        ('scaler', StandardScaler()),
-        ('lr', LogisticRegression(class_weight='balanced', random_state=42, max_iter=1000))
-    ])
-    
-    # SVM with scaling
-    svm_pipe = Pipeline([
-        ('scaler', StandardScaler()),
-        ('svm', SVC(kernel='rbf', class_weight='balanced', probability=True, random_state=42))
-    ])
-    
+    # Logistic Regression without scaling
+    lr = LogisticRegression(class_weight='balanced', random_state=42, max_iter=1000)
+
+    # SVM without scaling
+    svm = SVC(kernel='rbf', class_weight='balanced', probability=True, random_state=42)
+
     # Ensemble voting classifier
     ensemble = VotingClassifier([
         ('rf', rf),
-        ('gb', gb), 
-        ('lr', lr_pipe),
-        ('svm', svm_pipe)
+        ('gb', gb),
+        ('lr', lr),
+        ('svm', svm)
     ], voting='soft')
     
     # Train ensemble
