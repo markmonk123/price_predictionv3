@@ -1,0 +1,14 @@
+{
+  "ensemble_weights": {},
+  "heuristic_features": {},
+  "model_confidence_scores": {},
+  "training_metrics": {
+    "total_retrains": 0,
+    "successful_predictions": 0,
+    "failed_predictions": 0,
+    "data_updates": 6,
+    "last_update_time": "2025-09-10 23:40:09.085875",
+    "average_training_time": 0
+  },
+  "prediction_history": []
+}
