@@ -395,17 +395,26 @@ def fetch_blockchain_data():
         
     except Exception as e:
         print(f"   ❌ Error fetching blockchain data: {e}")
-        # Return minimal simulated data
+        # Return minimal simulated data with all required columns
         dates = pd.date_range(start=datetime.now() - timedelta(days=180), periods=180, freq='D')
         tx_counts = np.random.normal(300000, 50000, 180).astype(int)
         
-        return pd.DataFrame({
+        df_blockchain = pd.DataFrame({
             'date': dates.date,
             'transaction_count': tx_counts,
             'tx_variance': np.random.uniform(-0.1, 0.1, 180),
             'mempool_congestion': np.random.uniform(0, 1, 180),
             'estimated_conf_time': np.random.uniform(10, 240, 180)  # minutes
         })
+        
+        # Add mempool analysis to ensure all columns are present
+        current_data = {
+            'mempool_size': 100000000,  # Default 100MB
+            'avg_fee': 20  # Default 20 sat/vB
+        }
+        df_blockchain = add_mempool_analysis(df_blockchain, current_data)
+        
+        return df_blockchain
 
 
 def add_mempool_analysis(df_blockchain, current_mempool):
@@ -476,8 +485,22 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
     price_df['date'] = pd.to_datetime(price_df['date'])
     blockchain_df['date'] = pd.to_datetime(blockchain_df['date'])
     
-    # Merge dataframes
+    # Merge dataframes - use outer join if inner join fails
     merged_df = pd.merge(price_df, blockchain_df, on='date', how='inner')
+    
+    # If no matching dates, use outer join and fill missing values
+    if len(merged_df) == 0:
+        print("   ⚠️  No matching dates found, using outer join with forward fill...")
+        merged_df = pd.merge(price_df, blockchain_df, on='date', how='outer')
+        merged_df = merged_df.sort_values('date')
+        
+        # Forward fill blockchain data for dates with price data only
+        for col in blockchain_df.columns:
+            if col != 'date':
+                merged_df[col] = merged_df[col].fillna(method='ffill').fillna(method='bfill')
+        
+        # Keep only rows where we have price data
+        merged_df = merged_df[merged_df['price'].notna()]
     
     print(f"   🔄 Merged dataset: {len(merged_df)} days of combined data")
     
@@ -509,12 +532,79 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
             merged_df['tx_variance'] * 0.3
         )
         
-        # Transaction momentum indicators
-        merged_df['tx_momentum'] = merged_df['transaction_count'] / merged_df['tx_ma_7']
-        merged_df['tx_acceleration'] = merged_df['tx_trend'].diff()
+        # Transaction momentum indicators - check if columns exist first
+        if 'tx_ma_7' in merged_df.columns and 'transaction_count' in merged_df.columns:
+            merged_df['tx_momentum'] = merged_df['transaction_count'] / merged_df['tx_ma_7']
+        else:
+            merged_df['tx_momentum'] = 1.0  # Default neutral momentum
+            
+        if 'tx_trend' in merged_df.columns:
+            merged_df['tx_acceleration'] = merged_df['tx_trend'].diff()
+        else:
+            merged_df['tx_acceleration'] = 0.0  # Default no acceleration
     
     return merged_df
 
+
+
+def create_30min_data(df_daily):
+    """Convert daily data to 30-minute intervals using interpolation and noise."""
+    print("🔄 Converting daily data to 30-minute intervals...")
+    
+    # Ensure we have a datetime column
+    df_daily = df_daily.copy()
+    df_daily['date'] = pd.to_datetime(df_daily['date'])
+    
+    # Create 30-minute intervals for the last 7 days to have enough data for 12-hour forecast
+    end_date = df_daily['date'].max()
+    start_date = end_date - timedelta(days=7)
+    
+    # Create 30-minute timestamps
+    timestamps_30min = pd.date_range(
+        start=start_date, 
+        end=end_date, 
+        freq='30min'
+    )
+    
+    # Get the last 7 days of daily data
+    recent_daily = df_daily[df_daily['date'] >= start_date].sort_values('date')
+    
+    if len(recent_daily) == 0:
+        print("   ⚠️  No recent data available, using last available data")
+        recent_daily = df_daily.tail(7)
+    
+    # Create 30-minute dataframe
+    df_30min = pd.DataFrame({'date': timestamps_30min})
+    
+    # Interpolate prices with realistic intraday variation
+    base_prices = np.interp(
+        timestamps_30min.astype(np.int64),
+        recent_daily['date'].astype(np.int64),
+        recent_daily['price']
+    )
+    
+    # Add realistic intraday volatility (smaller than daily volatility)
+    daily_volatility = recent_daily['price'].pct_change().std()
+    intraday_volatility = daily_volatility * 0.3  # 30% of daily volatility for 30-min intervals
+    
+    # Add random walk with intraday patterns
+    random_walk = np.random.normal(0, intraday_volatility, len(timestamps_30min))
+    
+    # Add time-of-day effects (higher volatility during trading hours)
+    hours = timestamps_30min.hour
+    time_effect = 1 + 0.5 * np.sin(2 * np.pi * (hours - 12) / 24)  # Peak around noon
+    
+    # Combine effects
+    price_variations = random_walk * time_effect
+    df_30min['price'] = base_prices * (1 + price_variations)
+    
+    # Ensure prices are positive and reasonable
+    df_30min['price'] = np.maximum(df_30min['price'], base_prices * 0.95)
+    
+    print(f"   ✅ Created {len(df_30min)} 30-minute data points")
+    print(f"   📊 Price range: ${df_30min['price'].min():.2f} - ${df_30min['price'].max():.2f}")
+    
+    return df_30min
 
 
 def main():
@@ -543,7 +633,7 @@ def main():
     print(f"\n⏱️  TRANSACTION TIME ANALYSIS:")
     print("-" * 50)
     
-    if 'estimated_conf_time' in df.columns:
+    if 'estimated_conf_time' in df.columns and len(df) > 0:
         current_conf_time = df['estimated_conf_time'].iloc[-1]
         avg_conf_time = df['estimated_conf_time'].mean()
         max_conf_time = df['estimated_conf_time'].max()
@@ -923,6 +1013,53 @@ def main():
     print(f"   🏆 Best Validation Accuracy: {max(score['test_accuracy'] for score in model_scores.values()):.3f}")
     
     print("--- SCRIPT EXECUTION FINISHED ---")
+    
+    # Import and run enhanced forecasting system
+    try:
+        from enhanced_forecasting import run_enhanced_forecasting
+        
+        print("\n" + "="*80)
+        print("🔮 RUNNING ENHANCED FORECASTING SYSTEM")
+        print("="*80)
+        
+        # Convert daily data to 30-minute intervals by interpolation
+        # This simulates having 30-minute data
+        df_30min = create_30min_data(df)
+        
+        # Run enhanced forecasting
+        enhanced_results = run_enhanced_forecasting(df_30min)
+        
+        if enhanced_results:
+            print("\n✅ Enhanced forecasting completed successfully!")
+            
+            # Demonstrate continuous training system
+            try:
+                from continuous_training import run_continuous_training_demo
+                
+                print("\n" + "="*80)
+                print("🔄 STARTING CONTINUOUS TRAINING DEMONSTRATION")
+                print("="*80)
+                print("⏰ Running 3-minute demonstration of continuous model updates...")
+                print("💡 In production, this would run indefinitely with 5-minute intervals")
+                
+                # Run a short demo (3 minutes)
+                continuous_system = run_continuous_training_demo(df_30min, duration_minutes=3)
+                
+                print("\n✅ Continuous training demonstration completed!")
+                
+            except Exception as e:
+                print(f"\n❌ Error running continuous training demo: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        else:
+            print("\n❌ Enhanced forecasting failed")
+            
+    except Exception as e:
+        print(f"\n❌ Error running enhanced forecasting: {e}")
+        import traceback
+        traceback.print_exc()
+    
     return ensemble, selected_features, next_prediction, next_confidence, current_price
 
 
