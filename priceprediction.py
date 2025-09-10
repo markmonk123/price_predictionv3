@@ -395,17 +395,26 @@ def fetch_blockchain_data():
         
     except Exception as e:
         print(f"   ❌ Error fetching blockchain data: {e}")
-        # Return minimal simulated data
+        # Return minimal simulated data with all required columns
         dates = pd.date_range(start=datetime.now() - timedelta(days=180), periods=180, freq='D')
         tx_counts = np.random.normal(300000, 50000, 180).astype(int)
         
-        return pd.DataFrame({
+        df_blockchain = pd.DataFrame({
             'date': dates.date,
             'transaction_count': tx_counts,
             'tx_variance': np.random.uniform(-0.1, 0.1, 180),
             'mempool_congestion': np.random.uniform(0, 1, 180),
             'estimated_conf_time': np.random.uniform(10, 240, 180)  # minutes
         })
+        
+        # Add mempool analysis to ensure all columns are present
+        current_data = {
+            'mempool_size': 100000000,  # Default 100MB
+            'avg_fee': 20  # Default 20 sat/vB
+        }
+        df_blockchain = add_mempool_analysis(df_blockchain, current_data)
+        
+        return df_blockchain
 
 
 def add_mempool_analysis(df_blockchain, current_mempool):
@@ -476,8 +485,22 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
     price_df['date'] = pd.to_datetime(price_df['date'])
     blockchain_df['date'] = pd.to_datetime(blockchain_df['date'])
     
-    # Merge dataframes
+    # Merge dataframes - use outer join if inner join fails
     merged_df = pd.merge(price_df, blockchain_df, on='date', how='inner')
+    
+    # If no matching dates, use outer join and fill missing values
+    if len(merged_df) == 0:
+        print("   ⚠️  No matching dates found, using outer join with forward fill...")
+        merged_df = pd.merge(price_df, blockchain_df, on='date', how='outer')
+        merged_df = merged_df.sort_values('date')
+        
+        # Forward fill blockchain data for dates with price data only
+        for col in blockchain_df.columns:
+            if col != 'date':
+                merged_df[col] = merged_df[col].fillna(method='ffill').fillna(method='bfill')
+        
+        # Keep only rows where we have price data
+        merged_df = merged_df[merged_df['price'].notna()]
     
     print(f"   🔄 Merged dataset: {len(merged_df)} days of combined data")
     
@@ -509,9 +532,16 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
             merged_df['tx_variance'] * 0.3
         )
         
-        # Transaction momentum indicators
-        merged_df['tx_momentum'] = merged_df['transaction_count'] / merged_df['tx_ma_7']
-        merged_df['tx_acceleration'] = merged_df['tx_trend'].diff()
+        # Transaction momentum indicators - check if columns exist first
+        if 'tx_ma_7' in merged_df.columns and 'transaction_count' in merged_df.columns:
+            merged_df['tx_momentum'] = merged_df['transaction_count'] / merged_df['tx_ma_7']
+        else:
+            merged_df['tx_momentum'] = 1.0  # Default neutral momentum
+            
+        if 'tx_trend' in merged_df.columns:
+            merged_df['tx_acceleration'] = merged_df['tx_trend'].diff()
+        else:
+            merged_df['tx_acceleration'] = 0.0  # Default no acceleration
     
     return merged_df
 
@@ -543,7 +573,7 @@ def main():
     print(f"\n⏱️  TRANSACTION TIME ANALYSIS:")
     print("-" * 50)
     
-    if 'estimated_conf_time' in df.columns:
+    if 'estimated_conf_time' in df.columns and len(df) > 0:
         current_conf_time = df['estimated_conf_time'].iloc[-1]
         avg_conf_time = df['estimated_conf_time'].mean()
         max_conf_time = df['estimated_conf_time'].max()
