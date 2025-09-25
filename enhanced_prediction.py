@@ -1,31 +1,72 @@
 # Optional heavy dependencies are imported lazily to allow module import without them.
-try:
-    import numpy as np
-except Exception:
-    np = None
-try:
-    import pandas as pd
-except Exception:
-    pd = None
-try:
-    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
-    from sklearn.model_selection import train_test_split, cross_val_score
-    from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.svm import SVC
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.pipeline import Pipeline
-except Exception:
-    RandomForestClassifier = GradientBoostingClassifier = VotingClassifier = None
-    train_test_split = cross_val_score = None
-    classification_report = confusion_matrix = accuracy_score = None
-    LogisticRegression = SVC = None
-    StandardScaler = None
-    Pipeline = None
-try:
-    from scipy import stats
-except Exception:
-    stats = None
+
+import numpy as np
+import pandas as pd
+from numpy.typing import NDArray
+from typing import Optional, TypedDict
+import importlib
+
+StandardScaler = None
+Pipeline = None
+RandomForestClassifier = None
+GradientBoostingClassifier = None
+VotingClassifier = None
+LogisticRegression = None
+SVC = None
+train_test_split = None
+accuracy_score = None
+classification_report = None
+cross_val_score = None
+
+
+def _ensure_sklearn():
+    """Lazily import scikit-learn components when needed."""
+    global StandardScaler, Pipeline
+    global RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+    global LogisticRegression, SVC
+    global train_test_split, accuracy_score, classification_report, cross_val_score
+
+    if RandomForestClassifier is not None:
+        return
+
+    try:
+        from sklearn.ensemble import RandomForestClassifier as _RF, GradientBoostingClassifier as _GB, VotingClassifier as _VC
+        from sklearn.linear_model import LogisticRegression as _LR
+        from sklearn.svm import SVC as _SVC
+        from sklearn.model_selection import train_test_split as _tts, cross_val_score as _cvs
+        from sklearn.metrics import accuracy_score as _acc, classification_report as _cls
+        from sklearn.preprocessing import StandardScaler as _Scaler
+        from sklearn.pipeline import Pipeline as _Pipeline
+    except ImportError as exc:  # pragma: no cover - explicit guidance is more helpful than stack trace
+        raise ImportError(
+            "scikit-learn is required for the enhanced prediction script. "
+            "Install it via 'pip install scikit-learn'."
+        ) from exc
+
+    StandardScaler = _Scaler
+    Pipeline = _Pipeline
+    RandomForestClassifier = _RF
+    GradientBoostingClassifier = _GB
+    VotingClassifier = _VC
+    LogisticRegression = _LR
+    SVC = _SVC
+    train_test_split = _tts
+    accuracy_score = _acc
+    classification_report = _cls
+    cross_val_score = _cvs
+
+# Lazy loader for scipy.stats to avoid hard import at module import time (and avoid stub errors)
+_stats = None
+def _get_stats():
+    """Lazily import scipy.stats and cache it. Returns None if unavailable."""
+    global _stats
+    if _stats is None:
+        try:
+            _stats = importlib.import_module("scipy.stats")
+        except Exception:
+            _stats = None
+    return _stats
+
 # matplotlib is not required for core functionality; avoid importing to reduce dependency surface
 try:
     import requests
@@ -33,15 +74,123 @@ except Exception:
     requests = None
 from datetime import datetime, timedelta
 import time
+from collections import deque
 
-def create_enhanced_features(df, pct_threshold=0.002):
-    """Create comprehensive technical indicators for Bitcoin 1-minute interval prediction.
-    Requires numpy, pandas, and scipy.stats. Raises ImportError if unavailable.
+
+def _future_window_extrema(prices: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute future max/min prices and their indices within a fixed lookahead window."""
+    n = len(prices)
+    max_vals = np.full(n, np.nan)
+    max_idx = np.full(n, -1, dtype=int)
+    min_vals = np.full(n, np.nan)
+    min_idx = np.full(n, -1, dtype=int)
+
+    if window <= 0:
+        return max_vals, max_idx, min_vals, min_idx
+
+    max_deque = deque()
+    min_deque = deque()
+
+    for i in range(n - 1, -1, -1):
+        while max_deque and (max_deque[0][1] - i) > window:
+            max_deque.popleft()
+        while min_deque and (min_deque[0][1] - i) > window:
+            min_deque.popleft()
+
+        if max_deque:
+            max_vals[i] = max_deque[0][0]
+            max_idx[i] = max_deque[0][1]
+        if min_deque:
+            min_vals[i] = min_deque[0][0]
+            min_idx[i] = min_deque[0][1]
+
+        while max_deque and max_deque[-1][0] <= prices[i]:
+            max_deque.pop()
+        max_deque.append((prices[i], i))
+
+        while min_deque and min_deque[-1][0] >= prices[i]:
+            min_deque.pop()
+        min_deque.append((prices[i], i))
+
+    return max_vals, max_idx, min_vals, min_idx
+
+
+# TypedDict describing the trade plan returned by _find_optimal_trade
+class TradePlan(TypedDict):
+    entry_time: pd.Timestamp
+    entry_price: float
+    exit_time: pd.Timestamp
+    exit_price: float
+    return_: float
+
+def _find_optimal_trade(prices: np.ndarray, dates: np.ndarray, start_idx: int,
+                        horizon: int, trade_type: str) -> Optional[TradePlan]:
+    """Find the best trade (long/short) within the horizon using future data."""
+    start_idx = int(start_idx)
+    end_idx = min(len(prices), start_idx + horizon + 1)
+    if start_idx >= len(prices) - 1 or end_idx - (start_idx + 1) <= 0:
+        return None
+
+    window_prices = prices[start_idx + 1:end_idx]
+    window_dates = dates[start_idx + 1:end_idx]
+    if window_prices.size == 0:
+        return None
+
+    best = None
+    if trade_type == 'long':
+        min_price = window_prices[0]
+        min_idx_rel = 0
+        best_return = -np.inf
+        for idx, price in enumerate(window_prices):
+            if price < min_price:
+                min_price = price
+                min_idx_rel = idx
+            if min_price <= 0:
+                continue
+            ret = (price - min_price) / min_price
+            if ret > best_return:
+                best_return = ret
+                best = (min_idx_rel, idx, ret)
+    else:  # short
+        max_price = window_prices[0]
+        max_idx_rel = 0
+        best_return = -np.inf
+        for idx, price in enumerate(window_prices):
+            if price > max_price:
+                max_price = price
+                max_idx_rel = idx
+            if max_price <= 0:
+                continue
+            ret = (max_price - price) / max_price
+            if ret > best_return:
+                best_return = ret
+                best = (max_idx_rel, idx, ret)
+
+    if best is None or best[2] <= 0:
+        return None
+
+    entry_rel, exit_rel, ret = best
+    entry_idx = start_idx + 1 + entry_rel
+    exit_idx = start_idx + 1 + exit_rel
+    return {
+        'entry_time': pd.to_datetime(dates[entry_idx]),
+        'entry_price': float(prices[entry_idx]),
+        'exit_time': pd.to_datetime(dates[exit_idx]),
+        'exit_price': float(prices[exit_idx]),
+        'return_': float(ret)
+    }
+
+def create_enhanced_features(df, pct_threshold=0.01, interval_minutes=1, lookahead_minutes=24 * 60):
+    """Create comprehensive technical indicators and 24h lookahead targets.
+
+    This function will use scipy.stats.linregress for slope calculation when available.
+    If scipy is not installed, it will fall back to numpy.polyfit to compute slopes.
     """
-    if pd is None or np is None or stats is None:
-        raise ImportError("create_enhanced_features requires numpy, pandas, and scipy to be installed.")
+    if pd is None or np is None:
+        raise ImportError("create_enhanced_features requires numpy and pandas to be installed.")
 
     df = df.copy()
+    df = df.sort_values('date').reset_index(drop=True)
     
     # Basic time features
     df['dayofweek'] = df['date'].dt.dayofweek
@@ -101,8 +250,20 @@ def create_enhanced_features(df, pct_threshold=0.002):
             if len(window) < period:
                 return np.nan
             x = np.arange(len(window))
-            slope, _, _, _, _ = stats.linregress(x, window)
-            return slope
+            stats = _get_stats()
+            if stats is not None:
+                # Use scipy's linregress when available
+                try:
+                    slope, _, _, _, _ = stats.linregress(x, window)
+                    return slope
+                except Exception:
+                    pass
+            # Fallback to numpy.polyfit if scipy is not available or fails
+            try:
+                slope = np.polyfit(x, window, 1)[0]
+                return float(slope)
+            except Exception:
+                return np.nan
         
         df[f'lr_slope_{period}'] = df['price'].rolling(window=period).apply(
             lambda x: calc_slope(x, period), raw=True
@@ -123,14 +284,45 @@ def create_enhanced_features(df, pct_threshold=0.002):
     df['price_trend_120'] = np.where(df['price'] > df['sma_120'], 1, 0)
     df['trend_strength'] = df['price_trend_30'] + df['price_trend_120']
     
-    # Classification target
-    df['future_price'] = df['price'].shift(-1)
-    df['next_return'] = (df['future_price'] - df['price']) / df['price']
+    # 24-hour lookahead statistics
+    lookahead_steps = max(1, int(lookahead_minutes / max(interval_minutes, 1)))
+    prices = df['price'].to_numpy()
+    dates = df['date'].to_numpy(dtype='datetime64[ns]')
+
+    future_max, future_max_idx, future_min, future_min_idx = _future_window_extrema(prices, lookahead_steps)
+
+    safe_prices = np.where(prices == 0, np.nan, prices)
+    future_max_return = (future_max - prices) / safe_prices
+    future_min_return = (future_min - prices) / safe_prices
+
+    nat_value = np.datetime64('NaT')
+    future_max_time = np.full(len(df), nat_value, dtype='datetime64[ns]')
+    future_min_time = np.full(len(df), nat_value, dtype='datetime64[ns]')
+
+    valid_max = future_max_idx >= 0
+    valid_min = future_min_idx >= 0
+
+    if valid_max.any():
+        future_max_time[valid_max] = dates[future_max_idx[valid_max]]
+    if valid_min.any():
+        future_min_time[valid_min] = dates[future_min_idx[valid_min]]
+
+    df['future_max_price_24h'] = future_max
+    df['future_min_price_24h'] = future_min
+    df['future_max_return_24h'] = future_max_return
+    df['future_min_return_24h'] = future_min_return
+    df['future_max_time_24h'] = future_max_time
+    df['future_min_time_24h'] = future_min_time
+
+    # Classification target using best directional move within horizon
     df['target'] = 0
-    df.loc[df['next_return'] >= pct_threshold, 'target'] = 1
-    df.loc[df['next_return'] <= -pct_threshold, 'target'] = -1
-    
-    return df.dropna()
+    long_mask = future_max_return >= pct_threshold
+    short_mask = future_min_return <= -pct_threshold
+
+    df.loc[long_mask & (~short_mask | (future_max_return >= np.abs(future_min_return))), 'target'] = 1
+    df.loc[short_mask & (~long_mask | (np.abs(future_min_return) > future_max_return)), 'target'] = -1
+
+    return df.dropna().reset_index(drop=True)
 
 def fetch_bitcoin_data(num_points=36000, interval_minutes=1):
     """Fetch a specific number of Bitcoin price data points from Coinbase API.
@@ -202,27 +394,50 @@ def main():
     print("=" * 70)
     
     # Get data and create features
-    df = fetch_bitcoin_data(num_points=36000, interval_minutes=1)
+    interval_minutes = 1
+    lookahead_minutes = 24 * 60
+    lookahead_steps = lookahead_minutes // interval_minutes
+
+    df = fetch_bitcoin_data(num_points=36000, interval_minutes=interval_minutes)
     print(f"📊 Fetched {len(df)} data points of Bitcoin data at 1-minute intervals")
     
-    df = create_enhanced_features(df, pct_threshold=0.002) # Adjusted threshold for smaller timeframe
-    print(f"⚙️  Created {len(df.columns)-3} technical features")  # -3 for date, price, target
+    df = create_enhanced_features(
+        df,
+        pct_threshold=0.01,
+        interval_minutes=interval_minutes,
+        lookahead_minutes=lookahead_minutes
+    )
     
     # Select features (exclude non-predictive columns)
-    feature_cols = [col for col in df.columns if col not in ['date', 'price', 'future_price', 'next_return', 'target']]
-    X = df[feature_cols]
+    leakage_cols = {
+        'date',
+        'price',
+        'target',
+        'future_price',
+        'next_return',
+        'future_max_price_24h',
+        'future_min_price_24h',
+        'future_max_return_24h',
+        'future_min_return_24h',
+        'future_max_time_24h',
+        'future_min_time_24h'
+    }
+    feature_cols = [col for col in df.columns if col not in leakage_cols]
+    X = df[feature_cols].apply(lambda col: pd.to_numeric(col, errors='coerce')).astype(np.float64)
     y = df['target']
     
+    print(f"⚙️  Created {len(feature_cols)} technical features")
     print(f"🎯 Using {len(feature_cols)} features for prediction")
     
     # Class distribution
     class_dist = y.value_counts().sort_index()
     print(f"\n📈 Class Distribution:")
-    print(f"   Decrease ≥0.2%: {class_dist.get(-1, 0)} ({class_dist.get(-1, 0)/len(y)*100:.1f}%)")
-    print(f"   No Change: {class_dist.get(0, 0)} ({class_dist.get(0, 0)/len(y)*100:.1f}%)")
-    print(f"   Increase ≥0.2%: {class_dist.get(1, 0)} ({class_dist.get(1, 0)/len(y)*100:.1f}%)")
+    print(f"   Decrease ≥1.0% (24h): {class_dist.get(-1, 0)} ({class_dist.get(-1, 0)/len(y)*100:.1f}%)")
+    print(f"   No Trade ≥1.0%: {class_dist.get(0, 0)} ({class_dist.get(0, 0)/len(y)*100:.1f}%)")
+    print(f"   Increase ≥1.0% (24h): {class_dist.get(1, 0)} ({class_dist.get(1, 0)/len(y)*100:.1f}%)")
     
     # Time series split
+    _ensure_sklearn()
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
     
     # Create ensemble of classifiers
@@ -274,7 +489,7 @@ def main():
     
     print(f"\n📋 Classification Report:")
     print(classification_report(y_test, y_pred, 
-                              target_names=["Decrease ≥0.2%", "No Change", "Increase ≥0.2%"],
+                              target_names=["Decrease ≥1.0%", "No Trade", "Increase ≥1.0%"],
                               labels=[-1, 0, 1], zero_division=0))
     
     # Feature importance from Random Forest
@@ -293,30 +508,50 @@ def main():
     test_df['predicted'] = y_pred
     test_df['confidence'] = confidence
     
-    print(f"\n🎯 Bitcoin 0.2% Shift Predictions:")
+    print(f"\n🎯 Bitcoin 24h ≥1.0% Move Predictions:")
     print("=" * 80)
     
     # High confidence predictions
     high_conf_predictions = test_df[
         (test_df['predicted'] != 0) & (test_df['confidence'] >= 0.7)
     ]
-    
+
     if len(high_conf_predictions) > 0:
         print(f"🔥 High Confidence Predictions (≥70%):")
+        prices_array = df['price'].to_numpy()
+        dates_array = df['date'].to_numpy(dtype='datetime64[ns]')
         for _, row in high_conf_predictions.iterrows():
             direction = "📈 INCREASE" if row['predicted'] == 1 else "📉 DECREASE"
             timestamp = row['date'].strftime('%Y-%m-%d %H:%M:%S')
-            print(f"   Price ${row['price']:.2f} | {direction} by 0.2% | Confidence: {row['confidence']:.1%} | {timestamp}")
+            trade_type = 'long' if row['predicted'] == 1 else 'short'
+            trade_plan = _find_optimal_trade(
+                prices_array,
+                dates_array,
+                row.name,
+                lookahead_steps,
+                trade_type
+            )
+            print(f"   Price ${row['price']:.2f} | {direction} by ≥1.0% | Confidence: {row['confidence']:.1%} | {timestamp}")
+            if trade_plan:
+                entry_ts = trade_plan['entry_time'].strftime('%Y-%m-%d %H:%M')
+                exit_ts = trade_plan['exit_time'].strftime('%Y-%m-%d %H:%M')
+                trade_label = 'Long' if trade_type == 'long' else 'Short'
+                print(
+                    f"      {trade_label} Entry: {entry_ts} @ ${trade_plan['entry_price']:.2f} → Exit: {exit_ts} @ ${trade_plan['exit_price']:.2f}"
+                    f" | Return: {trade_plan['return_']:.2%}"
+                )
+            else:
+                print("      No actionable trade plan found within 24h horizon")
     else:
         print("⚠️  No high-confidence significant moves predicted")
-    
+
     # All predictions
     print(f"\n📋 All Test Predictions:")
     for _, row in test_df.iterrows():
         direction_map = {1: "Increase", -1: "Decrease", 0: "No Change"}
         direction = direction_map[row['predicted']]
         timestamp = row['date'].strftime('%Y-%m-%d %H:%M:%S')
-        print(f"Price ${row['price']:.2f} | Confidence: {row['confidence']:.3f} | {direction} by 0.2% {timestamp}")
+        print(f"Price ${row['price']:.2f} | Confidence: {row['confidence']:.3f} | {direction} by ≥1.0% (24h) {timestamp}")
     
     # Cross-validation
     cv_scores = cross_val_score(ensemble, X_train, y_train, cv=5, scoring='accuracy')

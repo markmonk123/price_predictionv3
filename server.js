@@ -11,6 +11,32 @@ const { logMessage, logError } = require('./utils/logger');
 // Environment variables
 require('dotenv').config();
 const PORT = process.env.PORT || 5000;
+const MIN_NODE_VERSION = [18, 18, 0];
+
+const isNodeVersionSupported = () => {
+  const [major = 0, minor = 0, patch = 0] = process.versions.node
+    .split('.')
+    .map((value) => parseInt(value, 10));
+
+  if (Number.isNaN(major) || Number.isNaN(minor) || Number.isNaN(patch)) {
+    return false;
+  }
+
+  if (major > MIN_NODE_VERSION[0]) return true;
+  if (major < MIN_NODE_VERSION[0]) return false;
+  if (minor > MIN_NODE_VERSION[1]) return true;
+  if (minor < MIN_NODE_VERSION[1]) return false;
+  return patch >= MIN_NODE_VERSION[2];
+};
+
+if (!isNodeVersionSupported()) {
+  const requiredVersion = MIN_NODE_VERSION.join('.');
+  const message = `Unsupported Node.js runtime detected (found ${process.version}). ` +
+    `Please install Node.js ${requiredVersion} or later.`;
+  logError(message);
+  console.error(message);
+  process.exit(1);
+}
 
 // Initialize Express app
 const app = express();

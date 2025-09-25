@@ -18,6 +18,8 @@ import Settings from './pages/Settings';
 import { fetchMarketData } from './services/marketService';
 import { fetchLatestPrediction } from './services/predictionService';
 
+const MIN_NODE_VERSION = process.env.REACT_APP_MIN_NODE_VERSION || '18.18.0';
+
 function App() {
   // Application state
   const [socket, setSocket] = useState(null);
@@ -28,6 +30,11 @@ function App() {
 
   // Initialize socket connection and fetch initial data
   useEffect(() => {
+    if (process.env.NODE_ENV === 'development') {
+      // eslint-disable-next-line no-console
+      console.info(`Tooling expects Node.js ${MIN_NODE_VERSION} or newer.`);
+    }
+
     // Initialize Socket.IO connection
     const socketConnection = io(process.env.REACT_APP_API_URL || 'http://localhost:5000');
     setSocket(socketConnection);

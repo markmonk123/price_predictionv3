@@ -3,7 +3,7 @@
  * Implements FIX protocol for market data and order execution
  */
 
-const QuickFIX = require('quick-fix');
+const QuickFIX = require('../lib/quickfix');
 const NodeCache = require('node-cache');
 const { logMessage, logError } = require('../utils/logger');
 

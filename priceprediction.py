@@ -18,24 +18,72 @@ import json
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Set
 
-def create_features(df, pct_threshold=0.01):
-    """Create comprehensive technical indicators and ML features for Bitcoin price prediction."""
-    df = df.copy()  # Avoid modifying original DataFrame
-    
-    # Basic time features
+
+@dataclass
+class PreprocessingStep:
+    """One preprocessing step that can be toggled on/off."""
+    name: str
+    builder: Callable[[pd.DataFrame], pd.DataFrame]
+    required_columns: Set[str] = field(default_factory=set)
+
+
+class PreprocessingPipeline:
+    """Apply a sequence of preprocessing steps while validating prerequisites."""
+
+    def __init__(self, steps: List[PreprocessingStep]):
+        self.steps = steps
+
+    def run(self, df: pd.DataFrame) -> pd.DataFrame:
+        available_columns = set(df.columns)
+        for step in self.steps:
+            missing = step.required_columns - available_columns
+            if missing:
+                print(f"   ⚠️  Skipping step '{step.name}' (missing columns: {sorted(missing)})")
+                continue
+
+            df = step.builder(df)
+            available_columns = set(df.columns)
+        return df
+
+
+def ensure_numeric_features(df: pd.DataFrame, exclude: Optional[Set[str]] = None) -> pd.DataFrame:
+    """Convert all feature columns to numeric-friendly formats for downstream models."""
+    exclude = exclude or set()
+    for column in df.columns:
+        if column in exclude:
+            continue
+        series = df[column]
+        if pd.api.types.is_bool_dtype(series):
+            df[column] = series.astype(np.float64)
+        elif pd.api.types.is_numeric_dtype(series):
+            df[column] = series.astype(np.float64)
+        else:
+            # Explicit conversion to float handles string NaNs and mixed types cleanly
+            df[column] = pd.to_numeric(series, errors='coerce').astype(np.float64)
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    return df
+
+
+def _add_basic_time_features(df: pd.DataFrame) -> pd.DataFrame:
     df['dayofweek'] = df['date'].dt.dayofweek
     df['month'] = df['date'].dt.month
     df['quarter'] = df['date'].dt.quarter
     df['is_weekend'] = (df['dayofweek'] >= 5).astype(int)
     df['is_month_end'] = (df['date'].dt.day >= 28).astype(int)
-    
-    # Price lag features
+    return df
+
+
+def _add_price_lag_features(df: pd.DataFrame) -> pd.DataFrame:
     for lag in [1, 2, 3, 5, 7, 10, 14, 21]:
         df[f'price_lag{lag}'] = df['price'].shift(lag)
         df[f'return_lag{lag}'] = df['price'].pct_change(lag)
-    
-    # Rolling statistics
+    return df
+
+
+def _add_rolling_statistics(df: pd.DataFrame) -> pd.DataFrame:
     for window in [5, 10, 15, 20, 30, 50]:
         df[f'sma_{window}'] = df['price'].rolling(window=window).mean()
         df[f'ema_{window}'] = df['price'].ewm(span=window).mean()
@@ -43,189 +91,243 @@ def create_features(df, pct_threshold=0.01):
         df[f'min_{window}'] = df['price'].rolling(window=window).min()
         df[f'max_{window}'] = df['price'].rolling(window=window).max()
         df[f'median_{window}'] = df['price'].rolling(window=window).median()
-        
-        # Price position within range
         df[f'price_position_{window}'] = (df['price'] - df[f'min_{window}']) / (df[f'max_{window}'] - df[f'min_{window}'])
-        
-        # Price relative to moving averages
         df[f'price_to_sma_{window}'] = df['price'] / df[f'sma_{window}']
         df[f'price_to_ema_{window}'] = df['price'] / df[f'ema_{window}']
-    
-    # Volatility features
+    return df
+
+
+def _add_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
+    returns = df['price'].pct_change()
     for window in [5, 10, 20, 30]:
-        returns = df['price'].pct_change()
         df[f'volatility_{window}'] = returns.rolling(window=window).std()
         df[f'realized_vol_{window}'] = np.sqrt(252) * returns.rolling(window=window).std()
-    
-    # MACD indicators (multiple timeframes)
+    return df
+
+
+def _add_macd_features(df: pd.DataFrame) -> pd.DataFrame:
     for fast, slow, signal in [(12, 26, 9), (5, 35, 5), (19, 39, 9)]:
         ema_fast = df['price'].ewm(span=fast).mean()
         ema_slow = df['price'].ewm(span=slow).mean()
         macd = ema_fast - ema_slow
         macd_signal = macd.ewm(span=signal).mean()
-        
         df[f'macd_{fast}_{slow}'] = macd
         df[f'macd_signal_{fast}_{slow}'] = macd_signal
         df[f'macd_histogram_{fast}_{slow}'] = macd - macd_signal
         df[f'macd_crossover_{fast}_{slow}'] = (macd > macd_signal).astype(int)
-    
-    # RSI (Relative Strength Index) - multiple periods
-    def calculate_rsi(prices, window=14):
-        delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
+    return df
+
+
+def _calculate_rsi(prices: pd.Series, window: int = 14) -> pd.Series:
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+
+def _add_rsi_features(df: pd.DataFrame) -> pd.DataFrame:
     for period in [7, 14, 21, 30]:
-        df[f'rsi_{period}'] = calculate_rsi(df['price'], period)
+        df[f'rsi_{period}'] = _calculate_rsi(df['price'], period)
         df[f'rsi_oversold_{period}'] = (df[f'rsi_{period}'] < 30).astype(int)
         df[f'rsi_overbought_{period}'] = (df[f'rsi_{period}'] > 70).astype(int)
-    
-    # Bollinger Bands (multiple periods)
+    return df
+
+
+def _add_bollinger_features(df: pd.DataFrame) -> pd.DataFrame:
     for period in [10, 20, 30]:
         for std_dev in [1.5, 2.0, 2.5]:
             bb_ma = df['price'].rolling(window=period).mean()
             bb_std = df['price'].rolling(window=period).std()
-            
             df[f'bb_upper_{period}_{std_dev}'] = bb_ma + (bb_std * std_dev)
             df[f'bb_lower_{period}_{std_dev}'] = bb_ma - (bb_std * std_dev)
             df[f'bb_width_{period}_{std_dev}'] = (df[f'bb_upper_{period}_{std_dev}'] - df[f'bb_lower_{period}_{std_dev}']) / bb_ma
             df[f'bb_position_{period}_{std_dev}'] = (df['price'] - df[f'bb_lower_{period}_{std_dev}']) / (df[f'bb_upper_{period}_{std_dev}'] - df[f'bb_lower_{period}_{std_dev}'])
-    
-    # Linear Regression Slope (momentum indicators)
-    def calc_slope(window):
-        if len(window) < len(window):
-            return np.nan
-        x = np.arange(len(window))
-        slope, _, r_value, _, _ = stats.linregress(x, window)
-        return slope
-    
-    def calc_r_squared(window):
-        if len(window) < len(window):
-            return np.nan
-        x = np.arange(len(window))
-        _, _, r_value, _, _ = stats.linregress(x, window)
-        return r_value ** 2
-    
+    return df
+
+
+def _calc_lr_slope(window: np.ndarray) -> float:
+    if window.size == 0 or np.isnan(window).all():
+        return np.nan
+    x = np.arange(len(window))
+    slope, _, _, _, _ = stats.linregress(x, window)
+    return slope
+
+
+def _calc_lr_r2(window: np.ndarray) -> float:
+    if window.size == 0 or np.isnan(window).all():
+        return np.nan
+    x = np.arange(len(window))
+    _, _, r_value, _, _ = stats.linregress(x, window)
+    return r_value ** 2
+
+
+def _add_linear_regression_features(df: pd.DataFrame) -> pd.DataFrame:
     for period in [5, 10, 14, 21, 30]:
-        df[f'lr_slope_{period}'] = df['price'].rolling(window=period).apply(calc_slope, raw=True)
-        df[f'lr_r2_{period}'] = df['price'].rolling(window=period).apply(calc_r_squared, raw=True)
-    
-    # Momentum indicators
+        df[f'lr_slope_{period}'] = df['price'].rolling(window=period).apply(_calc_lr_slope, raw=True)
+        df[f'lr_r2_{period}'] = df['price'].rolling(window=period).apply(_calc_lr_r2, raw=True)
+    return df
+
+
+def _add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     for period in [3, 7, 14, 21, 30]:
         df[f'momentum_{period}'] = (df['price'] / df['price'].shift(period) - 1) * 100
         df[f'roc_{period}'] = ((df['price'] - df['price'].shift(period)) / df['price'].shift(period)) * 100
-    
-    # Price acceleration (use periods that exist in momentum)
+    return df
+
+
+def _add_price_acceleration(df: pd.DataFrame) -> pd.DataFrame:
     for period in [7, 14, 21]:
         df[f'acceleration_{period}'] = df[f'momentum_{period}'].diff()
-    
-    # Stochastic Oscillator
+    return df
+
+
+def _add_stochastic_features(df: pd.DataFrame) -> pd.DataFrame:
     for period in [14, 21]:
         lowest_low = df['price'].rolling(window=period).min()
         highest_high = df['price'].rolling(window=period).max()
         df[f'stoch_k_{period}'] = 100 * (df['price'] - lowest_low) / (highest_high - lowest_low)
         df[f'stoch_d_{period}'] = df[f'stoch_k_{period}'].rolling(window=3).mean()
-    
-    # Williams %R
+    return df
+
+
+def _add_williams_r_features(df: pd.DataFrame) -> pd.DataFrame:
     for period in [14, 21]:
         highest_high = df['price'].rolling(window=period).max()
         lowest_low = df['price'].rolling(window=period).min()
         df[f'williams_r_{period}'] = -100 * (highest_high - df['price']) / (highest_high - lowest_low)
-    
-    # Detrended Price Oscillator (DPO)
+    return df
+
+
+def _add_dpo_features(df: pd.DataFrame) -> pd.DataFrame:
     for period in [10, 20, 30]:
         sma = df['price'].rolling(window=period).mean()
         shift_periods = (period // 2) + 1
         df[f'dpo_{period}'] = df['price'] - sma.shift(shift_periods)
-    
-    # Average True Range (using high-low as proxy)
+    return df
+
+
+def _add_atr_features(df: pd.DataFrame) -> pd.DataFrame:
     df['high_low_spread'] = (df['price'].rolling(window=5).max() - df['price'].rolling(window=5).min())
     for period in [7, 14, 21]:
         df[f'atr_{period}'] = df['high_low_spread'].rolling(window=period).mean()
-    
-    # Price channels and support/resistance
+    return df
+
+
+def _add_price_channel_features(df: pd.DataFrame) -> pd.DataFrame:
     for window in [10, 20, 50]:
         df[f'resistance_{window}'] = df['price'].rolling(window=window).max()
         df[f'support_{window}'] = df['price'].rolling(window=window).min()
         df[f'channel_position_{window}'] = (df['price'] - df[f'support_{window}']) / (df[f'resistance_{window}'] - df[f'support_{window}'])
-    
-    # Trend strength indicators
+    return df
+
+
+def _add_trend_strength_features(df: pd.DataFrame) -> pd.DataFrame:
     for window in [10, 20, 50]:
         df[f'uptrend_{window}'] = (df['price'] > df[f'sma_{window}']).astype(int)
         df[f'strong_uptrend_{window}'] = ((df['price'] > df[f'sma_{window}']) & (df[f'sma_{window}'] > df[f'sma_{window}'].shift(1))).astype(int)
-    
-    # Volume proxy indicators (using price volatility)
+    return df
+
+
+def _add_volume_proxy_features(df: pd.DataFrame) -> pd.DataFrame:
     df['volume_proxy'] = df['price'].rolling(window=20).std()
     df['price_volume_trend'] = df['price'] * df['volume_proxy']
     df['volume_sma'] = df['volume_proxy'].rolling(window=20).mean()
     df['volume_ratio'] = df['volume_proxy'] / df['volume_sma']
-    
-    # Fractal indicators
+    return df
+
+
+def _add_fractal_features(df: pd.DataFrame) -> pd.DataFrame:
     def is_fractal_high(series, period=5):
-        return series == series.rolling(window=period*2+1, center=True).max()
-    
+        return series == series.rolling(window=period * 2 + 1, center=True).max()
+
     def is_fractal_low(series, period=5):
-        return series == series.rolling(window=period*2+1, center=True).min()
-    
+        return series == series.rolling(window=period * 2 + 1, center=True).min()
+
     df['fractal_high'] = is_fractal_high(df['price']).astype(int)
     df['fractal_low'] = is_fractal_low(df['price']).astype(int)
-    
-    # BLOCKCHAIN AND TRANSACTION FEATURES
-    # Add blockchain-specific features if available
-    blockchain_features = ['transaction_count', 'tx_variance', 'mempool_congestion', 
-                          'estimated_conf_time', 'network_stress', 'tx_momentum', 
+    return df
+
+
+def _add_blockchain_indicator_features(df: pd.DataFrame) -> pd.DataFrame:
+    blockchain_features = ['transaction_count', 'tx_variance', 'mempool_congestion',
+                          'estimated_conf_time', 'network_stress', 'tx_momentum',
                           'tx_acceleration', 'price_tx_correlation', 'network_activity_score']
-    
+
     for feature in blockchain_features:
-        if feature in df.columns:
-            # Transaction count features
-            if feature == 'transaction_count':
-                df['tx_count_ma_7'] = df[feature].rolling(window=7).mean()
-                df['tx_count_ma_30'] = df[feature].rolling(window=30).mean()
-                df['tx_count_trend'] = (df['tx_count_ma_7'] / df['tx_count_ma_30'] - 1) * 100
-                df['tx_count_zscore'] = (df[feature] - df['tx_count_ma_30']) / df[feature].rolling(window=30).std()
-                
-            # Mempool stress indicators
-            elif feature == 'mempool_congestion':
-                df['mempool_stress_ma'] = df[feature].rolling(window=7).mean()
-                df['mempool_spike'] = (df[feature] > df['mempool_stress_ma'] * 1.5).astype(int)
-                
-            # Confirmation time analysis
-            elif feature == 'estimated_conf_time':
-                df['conf_time_acceptable'] = (df[feature] <= 240).astype(int)  # <= 4 hours
-                df['conf_time_ma'] = df[feature].rolling(window=7).mean()
-                df['conf_time_volatility'] = df[feature].rolling(window=7).std()
-                
-            # Network activity patterns
-            elif feature == 'network_activity_score':
-                df['network_activity_ma'] = df[feature].rolling(window=7).mean()
-                df['network_activity_trend'] = df[feature].diff()
-                
-    # Price-Transaction relationship features
-    if 'transaction_count' in df.columns:
-        # Transaction volume vs price movement correlation
-        price_returns = df['price'].pct_change()
-        tx_returns = df['transaction_count'].pct_change()
-        
-        df['price_tx_rolling_corr'] = price_returns.rolling(window=14).corr(tx_returns)
-        df['tx_price_divergence'] = (tx_returns - price_returns).abs()
-        
-        # Transaction efficiency relative to price
-        df['tx_per_dollar'] = df['transaction_count'] / df['price']
-        df['tx_efficiency'] = df['tx_per_dollar'] / df['tx_per_dollar'].rolling(window=30).mean()
-    
-    # Classification target: 1 if price increases >=1.0% next day, -1 if decreases <=-1.0%, 0 otherwise
+        if feature not in df.columns:
+            continue
+        if feature == 'transaction_count':
+            df['tx_count_ma_7'] = df[feature].rolling(window=7).mean()
+            df['tx_count_ma_30'] = df[feature].rolling(window=30).mean()
+            df['tx_count_trend'] = (df['tx_count_ma_7'] / df['tx_count_ma_30'] - 1) * 100
+            df['tx_count_zscore'] = (df[feature] - df['tx_count_ma_30']) / df[feature].rolling(window=30).std()
+        elif feature == 'mempool_congestion':
+            df['mempool_stress_ma'] = df[feature].rolling(window=7).mean()
+            df['mempool_spike'] = (df[feature] > df['mempool_stress_ma'] * 1.5).astype(int)
+        elif feature == 'estimated_conf_time':
+            df['conf_time_acceptable'] = (df[feature] <= 240).astype(int)
+            df['conf_time_ma'] = df[feature].rolling(window=7).mean()
+            df['conf_time_volatility'] = df[feature].rolling(window=7).std()
+        elif feature == 'network_activity_score':
+            df['network_activity_ma'] = df[feature].rolling(window=7).mean()
+            df['network_activity_trend'] = df[feature].diff()
+    return df
+
+
+def _add_price_transaction_relationships(df: pd.DataFrame) -> pd.DataFrame:
+    if 'transaction_count' not in df.columns:
+        return df
+
+    price_returns = df['price'].pct_change()
+    tx_returns = df['transaction_count'].pct_change()
+    df['price_tx_rolling_corr'] = price_returns.rolling(window=14).corr(tx_returns)
+    df['tx_price_divergence'] = (tx_returns - price_returns).abs()
+    df['tx_per_dollar'] = df['transaction_count'] / df['price']
+    df['tx_efficiency'] = df['tx_per_dollar'] / df['tx_per_dollar'].rolling(window=30).mean()
+    return df
+
+
+DEFAULT_PREPROCESSING_STEPS: List[PreprocessingStep] = [
+    PreprocessingStep('basic_time_features', _add_basic_time_features, {'date'}),
+    PreprocessingStep('price_lag_features', _add_price_lag_features, {'price'}),
+    PreprocessingStep('rolling_statistics', _add_rolling_statistics, {'price'}),
+    PreprocessingStep('volatility_features', _add_volatility_features, {'price'}),
+    PreprocessingStep('macd_features', _add_macd_features, {'price'}),
+    PreprocessingStep('rsi_features', _add_rsi_features, {'price'}),
+    PreprocessingStep('bollinger_features', _add_bollinger_features, {'price'}),
+    PreprocessingStep('linear_regression_features', _add_linear_regression_features, {'price'}),
+    PreprocessingStep('momentum_features', _add_momentum_features, {'price'}),
+    PreprocessingStep('price_acceleration', _add_price_acceleration, {'momentum_7'}),
+    PreprocessingStep('stochastic_features', _add_stochastic_features, {'price'}),
+    PreprocessingStep('williams_r', _add_williams_r_features, {'price'}),
+    PreprocessingStep('dpo_features', _add_dpo_features, {'price'}),
+    PreprocessingStep('atr_features', _add_atr_features, {'price'}),
+    PreprocessingStep('price_channels', _add_price_channel_features, {'price'}),
+    PreprocessingStep('trend_strength', _add_trend_strength_features, {'price', 'sma_10'}),
+    PreprocessingStep('volume_proxy', _add_volume_proxy_features, {'price'}),
+    PreprocessingStep('fractal_features', _add_fractal_features, {'price'}),
+    PreprocessingStep('blockchain_indicators', _add_blockchain_indicator_features),
+    PreprocessingStep('price_tx_relationships', _add_price_transaction_relationships, {'price', 'transaction_count'}),
+]
+
+def create_features(df: pd.DataFrame, pct_threshold: float = 0.01,
+                    steps: Optional[List[PreprocessingStep]] = None) -> pd.DataFrame:
+    """Create comprehensive technical indicators and ML features using modular steps."""
+    df = df.copy()
+    df['date'] = pd.to_datetime(df['date'])
+
+    pipeline = PreprocessingPipeline(steps or DEFAULT_PREPROCESSING_STEPS)
+    df = pipeline.run(df)
+
+    df = ensure_numeric_features(df, exclude={'date'})
+
     df['future_price'] = df['price'].shift(-1)
     df['pct_change'] = (df['future_price'] - df['price']) / df['price']
     df['target'] = 0
     df.loc[df['pct_change'] >= pct_threshold, 'target'] = 1
     df.loc[df['pct_change'] <= -pct_threshold, 'target'] = -1
-    
-    # Keep the last row (most recent) for prediction even if target is NaN
-    # Only drop NaN from training data, keep latest for prediction
+
     return df
 
 # Fetch historical BTC-USD daily prices from Coinbase API
