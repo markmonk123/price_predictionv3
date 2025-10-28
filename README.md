@@ -5,7 +5,7 @@ A comprehensive Bitcoin price prediction system featuring 12-hour forecasting, m
 ## 🚀 Features
 
 ### 🔮 12-Hour Price Forecasting
-- **30-minute intervals**: Generates 24 predictions covering the next 12 hours
+- **5-minute intervals**: Generates 144 predictions covering the next 12 hours
 - **Multi-step prediction**: Uses recursive forecasting with ensemble models
 - **Confidence intervals**: Provides prediction uncertainty estimates
 - **Detailed output**: Shows exact times, prices, and percentage changes
@@ -37,7 +37,7 @@ A comprehensive Bitcoin price prediction system featuring 12-hour forecasting, m
 ### 📋 Enhanced Output Format
 - **Professional formatting**: Clear sections with emojis and tables
 - **Real-time logging**: Comprehensive system status logging
-- **Detailed tables**: 30-minute prediction tables with all metrics
+- **Detailed tables**: 5-minute prediction tables with all metrics
 - **System metrics**: Model performance and health monitoring
 
 ## 🏃 Quick Start
@@ -111,13 +111,13 @@ pip install numpy pandas scikit-learn scipy matplotlib python-dateutil
    📊 AVERAGE Delta:  $+121.44 (+0.31%)
    📊 MEDIAN Delta:   $+152.35 (+0.39%)
 
-⏰ DETAILED 30-MINUTE PREDICTIONS:
+⏰ DETAILED 5-MINUTE PREDICTIONS:
 --------------------------------------------------------------------------------
 Time     Price        Change     Change%  Std Dev 
 --------------------------------------------------------------------------------
-00:30    $38,989.97   $+78.08    +0.20%   ±196.13 
-01:00    $38,956.82   $+44.93    +0.12%   ±184.77 
-01:30    $39,050.83   $+138.94   +0.36%   ±40.26  
+00:05    $38,989.97   $+78.08    +0.20%   ±196.13 
+00:10    $38,956.82   $+44.93    +0.12%   ±184.77 
+00:15    $39,050.83   $+138.94   +0.36%   ±40.26  
 ...
 ```
 
@@ -169,8 +169,8 @@ system.stop_continuous_system()
 
 ### Adjust prediction horizon
 ```python
-# Change from 12 hours to 6 hours (12 predictions)
-forecast_df = forecaster.generate_12_hour_forecast(data, horizon=12)
+# Change from 12 hours to 6 hours (72 predictions at 5-min intervals)
+forecast_df = forecaster.generate_12_hour_forecast(data, horizon=72)
 ```
 
 ### Modify update interval

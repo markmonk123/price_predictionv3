@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Enhanced Bitcoin Price Forecasting System
-Provides 12-hour predictions with 30-minute intervals, market sentiment analysis,
+Provides 12-hour predictions with 5-minute intervals, market sentiment analysis,
 multi-model training, and comprehensive statistical analysis.
 """
 
@@ -80,13 +80,13 @@ class EnhancedBitcoinForecaster:
         df = df.copy()
         
         # Lag features for sequence prediction
-        for lag in range(1, 25):  # 24 lags for 12-hour prediction (30-min intervals)
+        for lag in range(1, 145):  # 144 lags for 12-hour prediction (5-min intervals)
             df[f'price_lag_{lag}'] = df['price'].shift(lag)
-            if lag <= 12:  # Only short-term returns
+            if lag <= 72:  # Only short-term returns (6 hours)
                 df[f'return_lag_{lag}'] = df['price'].pct_change(lag)
         
         # Rolling statistics for different horizons
-        for window in [6, 12, 24, 48]:  # 3h, 6h, 12h, 24h in 30-min intervals
+        for window in [36, 72, 144, 288]:  # 3h, 6h, 12h, 24h in 5-min intervals
             df[f'sma_{window}'] = df['price'].rolling(window=window).mean()
             df[f'std_{window}'] = df['price'].rolling(window=window).std()
             df[f'min_{window}'] = df['price'].rolling(window=window).min()
@@ -100,13 +100,13 @@ class EnhancedBitcoinForecaster:
             )
         
         # Momentum and acceleration features
-        df['momentum_short'] = df['price'].pct_change(6)   # 3-hour momentum
-        df['momentum_medium'] = df['price'].pct_change(12)  # 6-hour momentum
-        df['momentum_long'] = df['price'].pct_change(24)   # 12-hour momentum
+        df['momentum_short'] = df['price'].pct_change(36)   # 3-hour momentum
+        df['momentum_medium'] = df['price'].pct_change(72)  # 6-hour momentum
+        df['momentum_long'] = df['price'].pct_change(144)   # 12-hour momentum
         
         # Volatility features
-        df['volatility_6h'] = df['price'].pct_change().rolling(window=12).std()
-        df['volatility_12h'] = df['price'].pct_change().rolling(window=24).std()
+        df['volatility_6h'] = df['price'].pct_change().rolling(window=72).std()
+        df['volatility_12h'] = df['price'].pct_change().rolling(window=144).std()
         
         # Time-based features
         df['hour'] = pd.to_datetime(df['date']).dt.hour
@@ -118,8 +118,8 @@ class EnhancedBitcoinForecaster:
         
         return df
     
-    def prepare_multistep_data(self, df, forecast_horizon=24):
-        """Prepare data for multi-step ahead prediction (24 steps = 12 hours)."""
+    def prepare_multistep_data(self, df, forecast_horizon=144):
+        """Prepare data for multi-step ahead prediction (144 steps = 12 hours at 5-min intervals)."""
         # Create features
         df = self.create_prediction_features(df)
         
@@ -190,7 +190,7 @@ class EnhancedBitcoinForecaster:
         
         return True
     
-    def recursive_predict(self, model, X_initial, steps=24):
+    def recursive_predict(self, model, X_initial, steps=144):
         """Use recursive prediction to forecast multiple steps ahead."""
         predictions = []
         current_X = X_initial.copy()
@@ -205,7 +205,7 @@ class EnhancedBitcoinForecaster:
             new_row = current_X.iloc[-1].copy()
             
             # Update price lags
-            for lag in range(24, 1, -1):  # Start from highest lag
+            for lag in range(144, 1, -1):  # Start from highest lag
                 if f'price_lag_{lag}' in new_row.index:
                     if f'price_lag_{lag-1}' in new_row.index:
                         new_row[f'price_lag_{lag}'] = new_row[f'price_lag_{lag-1}']
@@ -223,7 +223,7 @@ class EnhancedBitcoinForecaster:
         return predictions
     
     def generate_12_hour_forecast(self, latest_data):
-        """Generate 12-hour forecast with 30-minute intervals."""
+        """Generate 12-hour forecast with 5-minute intervals."""
         if not self.trained_models:
             print("   ❌ No trained models available")
             return None
@@ -238,16 +238,16 @@ class EnhancedBitcoinForecaster:
             print("   ❌ Unable to prepare data for prediction")
             return None
         
-        X_latest = df_prep[feature_cols].tail(50)  # Use last 50 points for context
+        X_latest = df_prep[feature_cols].tail(200)  # Use last 200 points for context (more for 5-min data)
         
         # Generate predictions from each model
         ensemble_predictions = []
         
         for name, model in self.trained_models.items():
             try:
-                predictions = self.recursive_predict(model, X_latest, steps=24)
+                predictions = self.recursive_predict(model, X_latest, steps=144)
                 ensemble_predictions.append(predictions)
-                print(f"   ✅ {name}: Generated 24 predictions")
+                print(f"   ✅ {name}: Generated 144 predictions")
             except Exception as e:
                 print(f"   ❌ {name}: Failed - {e}")
         
@@ -257,18 +257,18 @@ class EnhancedBitcoinForecaster:
         
         # Average predictions across models
         ensemble_avg = np.mean(ensemble_predictions, axis=0)
-        ensemble_std = np.std(ensemble_predictions, axis=0) if len(ensemble_predictions) > 1 else np.zeros(24)
+        ensemble_std = np.std(ensemble_predictions, axis=0) if len(ensemble_predictions) > 1 else np.zeros(144)
         
-        # Create timestamps for 12 hours ahead (30-minute intervals)
-        start_time = pd.to_datetime(latest_data['date'].iloc[-1]) + timedelta(minutes=30)
-        timestamps = [start_time + timedelta(minutes=30*i) for i in range(24)]
+        # Create timestamps for 12 hours ahead (5-minute intervals)
+        start_time = pd.to_datetime(latest_data['date'].iloc[-1]) + timedelta(minutes=5)
+        timestamps = [start_time + timedelta(minutes=5*i) for i in range(144)]
         
         # Create forecast DataFrame
         forecast_df = pd.DataFrame({
             'timestamp': timestamps,
             'predicted_price': ensemble_avg,
             'prediction_std': ensemble_std,
-            'interval_minutes': [30 * (i+1) for i in range(24)]
+            'interval_minutes': [5 * (i+1) for i in range(144)]
         })
         
         return forecast_df
@@ -277,8 +277,8 @@ class EnhancedBitcoinForecaster:
         """Analyze market sentiment using variance over specified window."""
         print(f"📈 Analyzing market sentiment over {window_hours}-hour window...")
         
-        # Convert window to 30-minute intervals
-        window_periods = window_hours * 2
+        # Convert window to 5-minute intervals
+        window_periods = window_hours * 12  # 12 periods per hour for 5-min intervals
         
         if len(df) < window_periods:
             print(f"   ⚠️  Insufficient data for {window_hours}-hour analysis")
@@ -390,8 +390,8 @@ class EnhancedBitcoinForecaster:
         print(f"   📊 AVERAGE Delta:  ${stats['delta_average']:+,.2f} ({stats['delta_average_pct']:+.2f}%)")
         print(f"   📊 MEDIAN Delta:   ${stats['delta_median']:+,.2f} ({stats['delta_median_pct']:+.2f}%)")
         
-        # Detailed 30-minute predictions
-        print(f"\n⏰ DETAILED 30-MINUTE PREDICTIONS:")
+        # Detailed 5-minute predictions
+        print(f"\n⏰ DETAILED 5-MINUTE PREDICTIONS:")
         print("-" * 80)
         print(f"{'Time':<8} {'Price':<12} {'Change':<10} {'Change%':<8} {'Std Dev':<8}")
         print("-" * 80)
