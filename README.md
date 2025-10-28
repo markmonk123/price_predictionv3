@@ -1,8 +1,15 @@
 # Enhanced Bitcoin Price Prediction System v3
 
-A comprehensive Bitcoin price prediction system featuring 12-hour forecasting, market sentiment analysis, multi-model training, and continuous data updates.
+A comprehensive Bitcoin price prediction system featuring 12-hour forecasting, market sentiment analysis, multi-model training, continuous data updates, and **advanced data normalization** for improved model performance.
 
 ## 🚀 Features
+
+### 🔄 Advanced Data Normalization (NEW!)
+- **Automatic feature normalization**: Features are normalized using z-score (standard) normalization before model training
+- **Smooth data pipeline**: Raw data → Feature creation → Normalization → Model training → Denormalized predictions
+- **Consistent normalization**: Same normalization parameters applied across training and continuous trading
+- **Accurate denormalization**: Predictions are automatically converted back to original scale for display
+- **Persistent normalizers**: Normalization parameters saved for continuous training consistency
 
 ### 🔮 12-Hour Price Forecasting
 - **30-minute intervals**: Generates 24 predictions covering the next 12 hours
@@ -62,9 +69,12 @@ python3 -c "from continuous_training import *; print('Continuous training ready'
 ## 📁 File Structure
 
 ```
-├── priceprediction.py           # Main prediction system
-├── enhanced_forecasting.py      # 12-hour forecasting module
-├── continuous_training.py       # Continuous training system
+├── priceprediction.py           # Main prediction system with normalization
+├── enhanced_forecasting.py      # 12-hour forecasting module with normalization
+├── continuous_training.py       # Continuous training system with normalization
+├── enhanced_prediction.py       # Enhanced prediction with optional normalization
+├── data_normalizer.py          # Data normalization/denormalization module (NEW!)
+├── test_normalization.py       # Normalization pipeline test (NEW!)
 ├── demo.py                      # Demo script
 ├── test_runner.py              # Test runner
 └── README.md                   # This file
@@ -81,6 +91,30 @@ Install dependencies:
 ```bash
 pip install numpy pandas scikit-learn scipy matplotlib python-dateutil
 ```
+
+## 🔄 Data Normalization Pipeline
+
+The system implements a sophisticated data normalization pipeline:
+
+1. **Feature Creation**: Technical indicators are created from raw price data
+2. **Normalization**: Features are normalized using z-score standardization
+3. **Model Training**: Models train on normalized features for better convergence
+4. **Prediction**: Models predict on normalized input features
+5. **Denormalization**: Predictions are automatically converted to original price scale
+6. **Display**: All outputs show real, denormalized prices
+
+### Testing Normalization
+
+Run the normalization test to verify the pipeline:
+```bash
+python3 test_normalization.py
+```
+
+This test validates:
+- Feature normalization accuracy
+- Model training with normalized data
+- Prediction denormalization correctness
+- End-to-end pipeline integrity
 
 ## 📊 Sample Output
 
