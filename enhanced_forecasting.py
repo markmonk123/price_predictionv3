@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Enhanced Bitcoin Price Forecasting System
-Provides 12-hour predictions with 30-minute intervals, market sentiment analysis,
-multi-model training, and comprehensive statistical analysis.
+Provides 24-hour, 12-hour, and 6-hour predictions with 15-minute intervals, 
+market sentiment analysis, multi-model training, and comprehensive statistical analysis.
 """
 
 import numpy as np
