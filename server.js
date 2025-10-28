@@ -3,9 +3,10 @@ const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
 const path = require('path');
-const { PythonShell } = require('python-shell');
 const fixService = require('./services/fixService');
 const predictionService = require('./services/predictionService');
+const coinbaseService = require('./services/coinbaseService');
+const dataFlowService = require('./services/dataFlowService');
 const { logMessage, logError } = require('./utils/logger');
 
 // Environment variables
@@ -32,22 +33,39 @@ const io = socketIo(server, {
 io.on('connection', (socket) => {
   logMessage(`New client connected: ${socket.id}`);
 
-  // Send initial data to new clients
-  predictionService.getLatestPrediction()
-    .then(prediction => {
-      socket.emit('predictionData', prediction);
-    })
-    .catch(err => logError('Error sending initial prediction data:', err));
+  // Send initial data to new clients using secure data pipeline
+  const sendInitialData = async () => {
+    try {
+      // Get data from multiple sources
+      const [prediction, marketData, coinbasePrice] = await Promise.all([
+        predictionService.getLatestPrediction(),
+        fixService.getMarketData(),
+        coinbaseService.getBitcoinPrice()
+      ]);
 
-  // Send market data updates
-  fixService.getMarketData()
-    .then(marketData => {
+      socket.emit('predictionData', prediction);
       socket.emit('marketData', marketData);
-    })
-    .catch(err => logError('Error sending market data:', err));
+      socket.emit('coinbaseData', coinbasePrice);
+    } catch (err) {
+      logError('Error sending initial data:', err);
+    }
+  };
+
+  sendInitialData();
+
+  // Start streaming Coinbase price updates to this client
+  const stopPriceStream = coinbaseService.streamPriceUpdates('BTC-USD', (priceData) => {
+    socket.emit('coinbasePriceUpdate', priceData);
+  }).catch(err => {
+    logError('Error starting price stream:', err);
+  });
 
   socket.on('disconnect', () => {
     logMessage(`Client disconnected: ${socket.id}`);
+    // Clean up streams
+    if (stopPriceStream && typeof stopPriceStream.then === 'function') {
+      stopPriceStream.then(cleanup => cleanup && cleanup());
+    }
   });
 });
 
@@ -56,10 +74,29 @@ app.use('/api/market', require('./routes/marketRoutes'));
 app.use('/api/predictions', require('./routes/predictionRoutes'));
 app.use('/api/orders', require('./routes/orderRoutes'));
 app.use('/api/fix', require('./routes/fixRoutes'));
+app.use('/api/coinbase', require('./routes/coinbaseRoutes'));
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  const health = {
+    status: 'ok',
+    timestamp: new Date(),
+    services: {
+      fix: fixService.isConnected || false,
+      dataFlow: dataFlowService.globalBufferPool.getStats()
+    }
+  };
+  res.json(health);
+});
 
 // Schedule regular market data updates via FIX
 fixService.initializeFixSession();
 fixService.scheduleMarketDataUpdates(io);
+
+// Initialize Coinbase SDK
+coinbaseService.initializeCoinbase().catch(err => {
+  logError('Failed to initialize Coinbase SDK:', err);
+});
 
 // Schedule regular prediction model runs
 predictionService.schedulePredictions(io);

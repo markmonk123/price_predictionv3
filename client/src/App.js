@@ -17,12 +17,14 @@ import Settings from './pages/Settings';
 // API Services
 import { fetchMarketData } from './services/marketService';
 import { fetchLatestPrediction } from './services/predictionService';
+import { getBitcoinPrice } from './services/coinbaseService';
 
 function App() {
   // Application state
   const [socket, setSocket] = useState(null);
   const [marketData, setMarketData] = useState(null);
   const [predictionData, setPredictionData] = useState(null);
+  const [coinbaseData, setCoinbaseData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -43,6 +45,10 @@ function App() {
         // Fetch prediction data
         const predictionResponse = await fetchLatestPrediction();
         setPredictionData(predictionResponse.data);
+
+        // Fetch Coinbase data
+        const coinbaseResponse = await getBitcoinPrice();
+        setCoinbaseData(coinbaseResponse);
 
         setLoading(false);
       } catch (err) {
@@ -67,6 +73,16 @@ function App() {
     socketConnection.on('predictionData', (data) => {
       console.log('Received prediction update:', data);
       setPredictionData(data);
+    });
+
+    socketConnection.on('coinbaseData', (data) => {
+      console.log('Received Coinbase data:', data);
+      setCoinbaseData(data);
+    });
+
+    socketConnection.on('coinbasePriceUpdate', (data) => {
+      console.log('Received Coinbase price update:', data);
+      setCoinbaseData(data);
     });
 
     socketConnection.on('disconnect', () => {
@@ -95,7 +111,8 @@ function App() {
             <Route path="/" element={
               <Dashboard 
                 marketData={marketData} 
-                predictionData={predictionData} 
+                predictionData={predictionData}
+                coinbaseData={coinbaseData}
                 loading={loading} 
                 error={error} 
               />
@@ -104,19 +121,22 @@ function App() {
               <TradingView 
                 socket={socket} 
                 marketData={marketData} 
-                predictionData={predictionData} 
+                predictionData={predictionData}
+                coinbaseData={coinbaseData}
               />
             } />
             <Route path="/predictions" element={
               <PredictionAnalysis 
-                predictionData={predictionData} 
+                predictionData={predictionData}
+                coinbaseData={coinbaseData}
                 loading={loading} 
               />
             } />
             <Route path="/orders" element={
               <OrderBook 
                 socket={socket} 
-                marketData={marketData} 
+                marketData={marketData}
+                coinbaseData={coinbaseData}
               />
             } />
             <Route path="/settings" element={<Settings />} />
