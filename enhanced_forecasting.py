@@ -133,8 +133,7 @@ class EnhancedBitcoinForecaster:
         
         # Replace infinite values with 0 before dropping NaN
         for col in feature_cols:
-            if col in df.columns:
-                df[col] = df[col].replace([np.inf, -np.inf], 0)
+            df[col] = df[col].replace([np.inf, -np.inf], 0)
         
         # Drop rows with NaN in features or targets
         valid_rows = df[feature_cols + target_cols].dropna()
