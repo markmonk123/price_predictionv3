@@ -189,8 +189,8 @@ class ContinuousTrainingSystem:
                         predicted_time = actual_time + timedelta(minutes=5)
                         historical = new_data.iloc[-(29998+1):-1]
                         head_rows = pd.DataFrame({
-                            'date': [predicted_time, actual_time],
-                            'price': [self.last_prediction, actual_price]
+                            'date': [actual_time, predicted_time],
+                            'price': [actual_price, self.last_prediction]
                         })
                         new_data = pd.concat([head_rows, historical], ignore_index=True)
 
