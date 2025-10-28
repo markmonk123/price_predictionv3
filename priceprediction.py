@@ -522,6 +522,12 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
         
         # Transaction volume vs price variance
         price_volatility = price_change.rolling(window=7).std()
+        
+        # Check if tx_variance exists, if not calculate it
+        if 'tx_variance' not in merged_df.columns:
+            tx_mean = merged_df['transaction_count'].rolling(window=7).mean()
+            merged_df['tx_variance'] = merged_df['transaction_count'].rolling(window=7).std() / (tx_mean + 1e-8)
+        
         tx_volatility = merged_df['tx_variance']
         
         vol_correlation = price_volatility.corr(tx_volatility)
@@ -534,18 +540,28 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
         merged_df['price_volatility'] = price_volatility
         merged_df['price_change'] = price_change
         
-        # Network stress indicators
+        # Network stress indicators - check if columns exist
+        mempool_congestion = merged_df.get('mempool_congestion', pd.Series([0.5]*len(merged_df), index=merged_df.index))
+        estimated_conf_time = merged_df.get('estimated_conf_time', pd.Series([60]*len(merged_df), index=merged_df.index))
+        
         merged_df['network_stress'] = (
-            merged_df['mempool_congestion'] * 0.4 +
-            (merged_df['estimated_conf_time'] / 240) * 0.3 +  # Normalize to 4-hour scale
+            mempool_congestion * 0.4 +
+            (estimated_conf_time / 240) * 0.3 +  # Normalize to 4-hour scale
             merged_df['tx_variance'] * 0.3
         )
         
         # Transaction momentum indicators - check if columns exist first
+        if 'tx_ma_7' not in merged_df.columns:
+            merged_df['tx_ma_7'] = merged_df['transaction_count'].rolling(window=7).mean()
+        
         if 'tx_ma_7' in merged_df.columns and 'transaction_count' in merged_df.columns:
             merged_df['tx_momentum'] = merged_df['transaction_count'] / (merged_df['tx_ma_7'] + 1e-8)
         else:
             merged_df['tx_momentum'] = 1.0  # Default neutral momentum
+            
+        if 'tx_trend' not in merged_df.columns:
+            tx_ma_14 = merged_df['transaction_count'].rolling(window=14).mean()
+            merged_df['tx_trend'] = (merged_df['tx_ma_7'] / (tx_ma_14 + 1e-8) - 1) * 100
             
         if 'tx_trend' in merged_df.columns:
             merged_df['tx_acceleration'] = merged_df['tx_trend'].diff()
