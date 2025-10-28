@@ -79,8 +79,10 @@ class EnhancedBitcoinForecaster:
         """Create features specifically designed for multi-step ahead prediction."""
         df = df.copy()
         
-        # Lag features for sequence prediction
-        for lag in range(1, 97):  # 96 lags for 24-hour prediction (15-min intervals)
+        # Lag features for sequence prediction - use selective lags to avoid overfitting
+        # Focus on key intervals: recent (1-10), hourly (4, 8, 12, 16, 20, 24), and longer (48, 96)
+        key_lags = list(range(1, 11)) + [12, 16, 20, 24, 36, 48, 72, 96]  # Reduced from 96 to ~20 lags
+        for lag in key_lags:
             df[f'price_lag_{lag}'] = df['price'].shift(lag)
             if lag <= 24:  # Only short-term returns
                 df[f'return_lag_{lag}'] = df['price'].pct_change(lag)
@@ -195,6 +197,9 @@ class EnhancedBitcoinForecaster:
         predictions = []
         current_X = X_initial.copy()
         
+        # Get the list of lag features that actually exist
+        lag_features = [col for col in current_X.columns if col.startswith('price_lag_')]
+        
         for step in range(steps):
             # Predict next value
             next_pred = model.predict(current_X.tail(1))[0]
@@ -204,11 +209,15 @@ class EnhancedBitcoinForecaster:
             # Shift lag features
             new_row = current_X.iloc[-1].copy()
             
-            # Update price lags
-            for lag in range(96, 1, -1):  # Start from highest lag (96 for 24-hour in 15-min intervals)
+            # Update price lags efficiently - only update existing lag features
+            # Extract lag numbers and sort them in descending order
+            lag_numbers = sorted([int(feat.split('_')[-1]) for feat in lag_features], reverse=True)
+            
+            for lag in lag_numbers[:-1]:  # All except the smallest lag
                 if f'price_lag_{lag}' in new_row.index:
-                    if f'price_lag_{lag-1}' in new_row.index:
-                        new_row[f'price_lag_{lag}'] = new_row[f'price_lag_{lag-1}']
+                    prev_lag = lag - 1
+                    if prev_lag > 0 and f'price_lag_{prev_lag}' in new_row.index:
+                        new_row[f'price_lag_{lag}'] = new_row[f'price_lag_{prev_lag}']
             
             # Set the first lag to the predicted price
             if 'price_lag_1' in new_row.index:
