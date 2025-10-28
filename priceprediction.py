@@ -554,7 +554,7 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
         if 'tx_ma_7' not in merged_df.columns:
             merged_df['tx_ma_7'] = merged_df['transaction_count'].rolling(window=7).mean()
         
-        if 'tx_ma_7' in merged_df.columns and 'transaction_count' in merged_df.columns:
+        if 'transaction_count' in merged_df.columns:
             merged_df['tx_momentum'] = merged_df['transaction_count'] / (merged_df['tx_ma_7'] + 1e-8)
         else:
             merged_df['tx_momentum'] = 1.0  # Default neutral momentum
@@ -563,10 +563,7 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
             tx_ma_14 = merged_df['transaction_count'].rolling(window=14).mean()
             merged_df['tx_trend'] = (merged_df['tx_ma_7'] / (tx_ma_14 + 1e-8) - 1) * 100
             
-        if 'tx_trend' in merged_df.columns:
-            merged_df['tx_acceleration'] = merged_df['tx_trend'].diff()
-        else:
-            merged_df['tx_acceleration'] = 0.0  # Default no acceleration
+        merged_df['tx_acceleration'] = merged_df['tx_trend'].diff()
     
     return merged_df
 
