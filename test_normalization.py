@@ -6,8 +6,14 @@ Demonstrates: Features → Normalization → Training → Prediction → Denorma
 
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
 from data_normalizer import DataNormalizer
 from enhanced_forecasting import EnhancedBitcoinForecaster
+
+# Test constants
+MAX_DEVIATION_THRESHOLD = 50.0  # Maximum acceptable deviation percentage for predictions
+DENORMALIZATION_TOLERANCE = 1e-6  # Tolerance for denormalization accuracy
+
 
 def test_normalization_pipeline():
     """Test the complete normalization pipeline."""
@@ -18,7 +24,8 @@ def test_normalization_pipeline():
     
     # Step 1: Create sample data
     print("\n📊 Step 1: Creating sample price data...")
-    dates = pd.date_range('2024-01-01', periods=500, freq='30T')
+    start_date = datetime.now() - timedelta(days=10)
+    dates = pd.date_range(start_date, periods=500, freq='30T')
     prices = np.cumsum(np.random.randn(500) * 100) + 50000
     df = pd.DataFrame({'date': dates, 'price': prices})
     
@@ -80,7 +87,7 @@ def test_normalization_pipeline():
     print(f"\n📊 QUALITY CHECKS:")
     print(f"   Max Deviation: {max_deviation_pct:.2f}%")
     
-    if max_deviation_pct > 50:
+    if max_deviation_pct > MAX_DEVIATION_THRESHOLD:
         print(f"   ⚠️  WARNING: Large deviation detected!")
         return False
     
@@ -88,11 +95,12 @@ def test_normalization_pipeline():
     
     # Test normalizer directly
     print(f"\n🧪 TESTING NORMALIZER DIRECTLY:")
+    start_date = datetime.now() - timedelta(days=1)
     test_df = pd.DataFrame({
-        'date': pd.date_range('2024-01-01', periods=10),
+        'date': pd.date_range(start_date, periods=10),
         'price': [50000] * 10,
-        'feature1': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        'feature2': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+        'feature1': np.arange(1, 11),
+        'feature2': np.arange(10, 101, 10)
     })
     
     normalizer = DataNormalizer(method='standard')
@@ -106,7 +114,7 @@ def test_normalization_pipeline():
     print(f"   Feature1 max difference: {diff1:.10f}")
     print(f"   Feature2 max difference: {diff2:.10f}")
     
-    if diff1 < 1e-6 and diff2 < 1e-6:
+    if diff1 < DENORMALIZATION_TOLERANCE and diff2 < DENORMALIZATION_TOLERANCE:
         print(f"   ✅ Denormalization is accurate")
     else:
         print(f"   ❌ Denormalization error detected!")
