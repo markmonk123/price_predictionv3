@@ -116,6 +116,10 @@ This test validates:
 - Prediction denormalization correctness
 - End-to-end pipeline integrity
 
+### Full Documentation
+
+For complete normalization documentation, see [NORMALIZATION.md](NORMALIZATION.md)
+
 ## 📊 Sample Output
 
 ```
