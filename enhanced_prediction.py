@@ -30,6 +30,12 @@ except Exception:
 from datetime import datetime, timedelta
 import time
 
+# Import data normalizer
+try:
+    from data_normalizer import DataNormalizer
+except Exception:
+    DataNormalizer = None
+
 def create_enhanced_features(df, pct_threshold=0.002):
     """Create comprehensive technical indicators for Bitcoin 1-minute interval prediction.
     Requires numpy, pandas, and scipy.stats. Raises ImportError if unavailable.
@@ -211,6 +217,16 @@ def main():
     
     print(f"🎯 Using {len(feature_cols)} features for prediction")
     
+    # Normalize features
+    if DataNormalizer is not None:
+        print(f"\n🔄 Normalizing features...")
+        normalizer = DataNormalizer(method='standard')
+        df_normalized = normalizer.fit_transform(df, exclude_cols=['date', 'price', 'future_price', 'next_return', 'target'])
+        X = df_normalized[feature_cols]
+        print(f"✅ Features normalized using standard (z-score) normalization")
+    else:
+        print(f"⚠️  DataNormalizer not available, using raw features")
+    
     # Class distribution
     class_dist = y.value_counts().sort_index()
     print(f"\n📈 Class Distribution:")
@@ -235,10 +251,10 @@ def main():
         n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42
     )
     
-    # Logistic Regression without scaling
+    # Logistic Regression (works with normalized data)
     lr = LogisticRegression(class_weight='balanced', random_state=42, max_iter=1000)
 
-    # SVM without scaling
+    # SVM (works with normalized data)
     svm = SVC(kernel='rbf', class_weight='balanced', probability=True, random_state=42)
 
     # Ensemble voting classifier
@@ -278,7 +294,7 @@ def main():
     for i, (_, row) in enumerate(feature_importance.head(10).iterrows(), 1):
         print(f"   {i:2d}. {row['feature']}: {row['importance']:.4f}")
     
-    # Predictions with timestamps
+    # Predictions with timestamps (denormalized - they're displayed as-is)
     test_df = df.iloc[-len(y_test):].copy()
     test_df['predicted'] = y_pred
     test_df['confidence'] = confidence
@@ -300,9 +316,9 @@ def main():
     else:
         print("⚠️  No high-confidence significant moves predicted")
     
-    # All predictions
-    print(f"\n📋 All Test Predictions:")
-    for _, row in test_df.iterrows():
+    # All predictions (showing denormalized prices)
+    print(f"\n📋 All Test Predictions (showing denormalized prices):")
+    for _, row in test_df.head(10).iterrows():  # Show first 10
         direction_map = {1: "Increase", -1: "Decrease", 0: "No Change"}
         direction = direction_map[row['predicted']]
         timestamp = row['date'].strftime('%Y-%m-%d %H:%M:%S')
@@ -316,7 +332,8 @@ def main():
     print(f"\n✅ Analysis Complete!")
     print(f"   📊 Dataset: {len(X_train)} train + {len(X_test)} test samples")
     print(f"   🤖 Ensemble: 4 algorithms (RF, GB, LR, SVM)")
-    print(f"   📈 Features: {len(feature_cols)} technical indicators")
+    print(f"   📈 Features: {len(feature_cols)} technical indicators (normalized)")
+    print(f"   💰 Predictions: Denormalized and displayed in original price scale")
 
 if __name__ == "__main__":
     main()

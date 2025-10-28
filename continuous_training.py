@@ -16,6 +16,9 @@ from concurrent.futures import ThreadPoolExecutor
 import warnings
 warnings.filterwarnings('ignore')
 
+# Import data normalizer
+from data_normalizer import DataNormalizer
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -203,13 +206,13 @@ class ContinuousTrainingSystem:
                         train_data.resample('30T', on='date').last().dropna().reset_index()
                     )
 
-                    # Retrain models
+                    # Retrain models (normalization happens inside train_models)
                     start_time = time.time()
                     success = forecaster.train_models(train_data)
                     training_time = time.time() - start_time
 
                     if success:
-                        # Store trained model
+                        # Store trained model with its normalizer
                         self.model_pool[model_id] = {
                             'forecaster': forecaster,
                             'training_time': training_time,
@@ -219,14 +222,16 @@ class ContinuousTrainingSystem:
                         }
 
                         logger.info(f"✅ {model_id}: Training completed in {training_time:.2f}s")
+                        logger.info(f"   📊 Normalized features using forecaster's normalizer")
 
-                        # Generate and log 12-hour forecast
+                        # Generate and log 12-hour forecast (predictions are denormalized inside generate_12_hour_forecast)
                         forecast = forecaster.generate_12_hour_forecast(train_data)
                         if forecast is not None:
                             self.last_prediction = forecast['predicted_price'].iloc[0]
-                            for _, row in forecast.iterrows():
+                            logger.info(f"   🔮 Next prediction (denormalized): ${self.last_prediction:.2f}")
+                            for _, row in forecast.head(3).iterrows():  # Log first 3 predictions
                                 logger.info(
-                                    f"🕒 {row['timestamp']}: ${row['predicted_price']:.2f}"
+                                    f"   🕒 {row['timestamp']}: ${row['predicted_price']:.2f}"
                                 )
                     else:
                         logger.warning(f"⚠️ {model_id}: Training failed")
