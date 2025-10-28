@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import requests
 import time
 import json
+import os
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
@@ -226,83 +227,105 @@ def create_features(df, pct_threshold=0.01):
     # Only drop NaN from training data, keep latest for prediction
     return df
 
-# Fetch historical BTC-USD daily prices from Coinbase API
+# Fetch historical BTC-USD data from FIX service (via Node.js REST API)
 def fetch_bitcoin_futures_data():
     """
-    Fetch the last 60,000 1-minute BTC-USD data points from Coinbase API,
-    then resample to daily closing prices to match the rest of the analysis pipeline.
+    Fetch Bitcoin historical price data from the FIX service API endpoint.
+    This connects to the Node.js FIX service which provides real Bitcoin market data.
+    Falls back to direct Coinbase API if the FIX service is unavailable.
     """
-    print("Fetching last 60,000 1-minute data points...")
-    all_data = []
-    total_points_to_fetch = 60000
-    points_per_request = 300  # Coinbase API limit per request
-    num_requests = total_points_to_fetch // points_per_request
+    print("Fetching Bitcoin data from FIX service...")
     
-    url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
-    # Start from the current time and go backwards
-    end_time = datetime.utcnow()
-
+    # Try to fetch from FIX service first
     try:
-        for i in range(num_requests):
-            # Calculate the start time for this chunk
-            # The API takes times in ISO 8601 format
-            start_time = end_time - timedelta(minutes=points_per_request)
-            
-            params = {
-                "granularity": 60,  # 60 seconds = 1 minute
-                "start": start_time.isoformat(),
-                "end": end_time.isoformat()
-            }
-            
-            print(f"Request {i+1}/{num_requests}: Fetching data from {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}")
-            
-            response = requests.get(url, params=params, timeout=15)
-            response.raise_for_status()
+        # Check if FIX service is running (typically on port 5000 or 4000)
+        fix_service_url = os.getenv('FIX_SERVICE_URL', 'http://localhost:5000/api/market/historical')
+        
+        # Fetch large dataset to get comprehensive training data
+        # Request daily granularity (86400 seconds) for the last 300 days
+        params = {
+            'symbol': 'BTC/USD',
+            'granularity': 86400,  # Daily candles
+            'limit': 300           # Last 300 days
+        }
+        
+        print(f"Requesting data from FIX service: {fix_service_url}")
+        response = requests.get(fix_service_url, params=params, timeout=30)
+        
+        if response.status_code == 200:
             data = response.json()
             
-            if not data:
-                print("   No more data available from API.")
-                break
+            if 'data' in data and len(data['data']) > 0:
+                # Convert FIX service data to DataFrame
+                historical_data = data['data']
+                
+                df = pd.DataFrame(historical_data)
+                df['date'] = pd.to_datetime(df['timestamp'])
+                df['price'] = pd.to_numeric(df['close'], errors='coerce')
+                
+                # Keep only required columns
+                df = df[['date', 'price']].dropna()
+                
+                print(f"Successfully fetched {len(df)} days of real Bitcoin data from FIX service")
+                print(f"Date range: {df['date'].min()} to {df['date'].max()}")
+                print(f"Price range: ${df['price'].min():.2f} to ${df['price'].max():.2f}")
+                
+                return df
+            else:
+                print("FIX service returned no data, trying direct API...")
+                raise ValueError("No data from FIX service")
+        else:
+            print(f"FIX service returned status {response.status_code}, trying direct API...")
+            raise ValueError(f"FIX service error: {response.status_code}")
             
-            all_data.extend(data)
-            
-            # The timestamp of the oldest candle becomes the end_time for the next request
-            # This allows us to paginate backwards in time
-            oldest_timestamp = data[-1][0]
-            end_time = datetime.fromtimestamp(oldest_timestamp)
-
-            time.sleep(0.5) # Add a delay to respect API rate limits
-
-        if not all_data:
+    except Exception as e:
+        print(f"FIX service unavailable: {e}")
+        print("Falling back to direct Coinbase API...")
+    
+    # Fallback to direct Coinbase API
+    try:
+        print("Fetching from Coinbase API directly...")
+        all_data = []
+        
+        # Fetch daily data for the last 300 days
+        url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(days=300)
+        
+        params = {
+            "granularity": 86400,  # Daily candles
+            "start": start_time.isoformat(),
+            "end": end_time.isoformat()
+        }
+        
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        if not data:
             raise ValueError("No data received from Coinbase API")
-
-        # Convert raw list of lists to a DataFrame
-        candles = pd.DataFrame(all_data, columns=["time", "low", "high", "open", "close", "volume"])
-        # Sort by time, remove any duplicates, and sort again
-        candles = candles.sort_values("time", ascending=False).drop_duplicates(subset=['time']).sort_values("time")
+        
+        # Convert to DataFrame
+        # Coinbase format: [timestamp, low, high, open, close, volume]
+        candles = pd.DataFrame(data, columns=["time", "low", "high", "open", "close", "volume"])
+        candles = candles.sort_values("time").drop_duplicates(subset=['time'])
         
         candles["date"] = pd.to_datetime(candles["time"], unit="s")
         candles["price"] = pd.to_numeric(candles["close"], errors='coerce')
         
-        print(f"Successfully fetched {len(candles)} unique 1-minute data points.")
+        daily_df = candles[['date', 'price']].dropna()
         
-        # --- RESAMPLING TO DAILY DATA ---
-        # The rest of the script (features, blockchain data) is based on a daily timeframe.
-        # We resample the 1-minute data to daily data to ensure compatibility.
-        print("Resampling 1-minute data to daily closing prices...")
-        candles.set_index('date', inplace=True)
-        daily_df = candles['price'].resample('D').last().dropna().to_frame().reset_index()
+        print(f"Successfully fetched {len(daily_df)} days of Bitcoin data from Coinbase API")
+        print(f"Date range: {daily_df['date'].min()} to {daily_df['date'].max()}")
         
-        print(f"Resampled to {len(daily_df)} days of BTC price data.")
         return daily_df
-
+        
     except Exception as e:
-        print(f"Error fetching data: {e}")
-        # Fallback to simulated data for testing
-        print("Using simulated data for testing...")
-        dates = pd.date_range(start="2024-01-01", periods=300, freq='D')
-        prices = np.cumsum(np.random.randn(300) * 1000) + 45000
-        return pd.DataFrame({'date': dates, 'price': prices})
+        print(f"ERROR: Failed to fetch Bitcoin data from all sources: {e}")
+        print("Cannot proceed without real Bitcoin data.")
+        raise RuntimeError("Unable to fetch Bitcoin price data from FIX service or Coinbase API. "
+                         "Please ensure the FIX service is running or network connection is available.")
+
 
 
 def fetch_blockchain_data():

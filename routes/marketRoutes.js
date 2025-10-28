@@ -25,6 +25,37 @@ router.get('/data', async (req, res) => {
 });
 
 /**
+ * @route   GET /api/market/historical
+ * @desc    Get historical market data for model training
+ * @access  Public
+ */
+router.get('/historical', async (req, res) => {
+  try {
+    const { 
+      symbol = 'BTC/USD',
+      granularity = 60,  // 1 minute candles by default
+      limit = 300        // Last 300 data points by default
+    } = req.query;
+    
+    const historicalData = await fixService.getHistoricalMarketData(
+      symbol, 
+      parseInt(granularity), 
+      parseInt(limit)
+    );
+    
+    res.json({
+      symbol,
+      granularity: parseInt(granularity),
+      count: historicalData.length,
+      data: historicalData
+    });
+  } catch (error) {
+    logError('Error getting historical market data:', error);
+    res.status(500).json({ error: 'Failed to fetch historical market data' });
+  }
+});
+
+/**
  * @route   POST /api/market/subscribe
  * @desc    Subscribe to market data via FIX
  * @access  Private (would require auth middleware in production)
