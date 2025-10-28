@@ -18,6 +18,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 warnings.filterwarnings('ignore')
 
+# Import data normalizer
+from data_normalizer import DataNormalizer
+
 class EnhancedBitcoinForecaster:
     """Enhanced forecasting system with multi-model training and 12-hour predictions."""
     
@@ -28,6 +31,7 @@ class EnhancedBitcoinForecaster:
         self.is_training = False
         self.last_update = None
         self.latest_data = None
+        self.normalizer = None  # Store normalizer for consistent normalization
         
         # Initialize multiple models for ensemble
         self.models = {
@@ -150,9 +154,17 @@ class EnhancedBitcoinForecaster:
             print("   ⚠️  Insufficient data for multi-step training")
             return False
         
-        X = prepared_df[feature_cols]
+        print("   🔄 Normalizing features before training...")
+        # Initialize and fit normalizer on training data
+        self.normalizer = DataNormalizer(method='standard')
+        prepared_df_normalized = self.normalizer.fit_transform(
+            prepared_df, 
+            exclude_cols=['date', 'price'] + target_cols
+        )
+        
+        X = prepared_df_normalized[feature_cols]
         # For now, train on 1-step ahead target, but we'll use recursive prediction
-        y = prepared_df['target_1'] 
+        y = prepared_df_normalized['target_1'] 
         
         # Train-test split
         X_train, X_test, y_train, y_test = train_test_split(
@@ -228,6 +240,10 @@ class EnhancedBitcoinForecaster:
             print("   ❌ No trained models available")
             return None
         
+        if self.normalizer is None:
+            print("   ❌ Normalizer not available")
+            return None
+        
         print("🔮 Generating 12-hour forecast...")
         
         # Prepare the latest data
@@ -238,7 +254,9 @@ class EnhancedBitcoinForecaster:
             print("   ❌ Unable to prepare data for prediction")
             return None
         
-        X_latest = df_prep[feature_cols].tail(50)  # Use last 50 points for context
+        # Normalize features using the fitted normalizer
+        df_prep_normalized = self.normalizer.transform(df_prep, exclude_cols=['date', 'price'])
+        X_latest = df_prep_normalized[feature_cols].tail(50)  # Use last 50 points for context
         
         # Generate predictions from each model
         ensemble_predictions = []
@@ -255,7 +273,7 @@ class EnhancedBitcoinForecaster:
             print("   ❌ No successful predictions generated")
             return None
         
-        # Average predictions across models
+        # Average predictions across models (predictions are already in original price scale for regression)
         ensemble_avg = np.mean(ensemble_predictions, axis=0)
         ensemble_std = np.std(ensemble_predictions, axis=0) if len(ensemble_predictions) > 1 else np.zeros(24)
         
@@ -263,13 +281,15 @@ class EnhancedBitcoinForecaster:
         start_time = pd.to_datetime(latest_data['date'].iloc[-1]) + timedelta(minutes=30)
         timestamps = [start_time + timedelta(minutes=30*i) for i in range(24)]
         
-        # Create forecast DataFrame
+        # Create forecast DataFrame (predictions are already denormalized/in original scale)
         forecast_df = pd.DataFrame({
             'timestamp': timestamps,
             'predicted_price': ensemble_avg,
             'prediction_std': ensemble_std,
             'interval_minutes': [30 * (i+1) for i in range(24)]
         })
+        
+        print(f"   ✅ Forecast generated with {len(ensemble_predictions)} models")
         
         return forecast_df
     

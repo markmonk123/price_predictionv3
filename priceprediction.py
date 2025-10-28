@@ -17,6 +17,9 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
+# Import data normalizer
+from data_normalizer import DataNormalizer
+
 def create_features(df, pct_threshold=0.01):
     """Create comprehensive technical indicators and ML features for Bitcoin price prediction."""
     df = df.copy()  # Avoid modifying original DataFrame
@@ -706,9 +709,22 @@ def main():
                           for keyword in ['tx_', 'mempool', 'conf_time', 'network_', 'blockchain'])]
     print(f"🔗 Blockchain features: {len(blockchain_features)}")
     
-    X_training = training_data[feature_columns]
-    y_training = training_data['target']
-    X_latest = latest_data[feature_columns]
+    print("--- NORMALIZING FEATURES ---")
+    # Initialize normalizer and fit on training data
+    normalizer = DataNormalizer(method='standard')
+    
+    # Fit normalizer on training data only (to prevent data leakage)
+    normalizer.fit(training_data, exclude_cols=['date', 'price', 'future_price', 'pct_change', 'target'])
+    
+    # Transform both training and latest data
+    training_data_normalized = normalizer.transform(training_data, exclude_cols=['date', 'price', 'future_price', 'pct_change', 'target'])
+    latest_data_normalized = normalizer.transform(latest_data, exclude_cols=['date', 'price', 'future_price', 'pct_change', 'target'])
+    
+    print(f"✅ Features normalized using standard (z-score) normalization")
+    
+    X_training = training_data_normalized[feature_columns]
+    y_training = training_data_normalized['target']
+    X_latest = latest_data_normalized[feature_columns]
     
     # Handle any remaining NaN values more comprehensively
     print(f"   🔧 Handling missing values...")
@@ -997,6 +1013,10 @@ def main():
     print(f"   🎯 Features: {len(selected_features)} selected from {len(feature_columns)} total")
     print(f"   🔗 Blockchain: {len(selected_blockchain_features)} network activity features")
     print(f"   🏆 Best Validation Accuracy: {max(score['test_accuracy'] for score in model_scores.values()):.3f}")
+    
+    # Save normalizer for use in continuous training
+    normalizer.save('/tmp/price_prediction_normalizer.pkl')
+    print(f"   💾 Normalizer saved for continuous training")
     
     print("--- SCRIPT EXECUTION FINISHED ---")
     
