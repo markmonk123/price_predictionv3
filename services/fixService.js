@@ -295,33 +295,71 @@ const getMarketData = async (symbol = 'BTC/USD') => {
     return cachedData;
   }
 
-  // If no cached data, simulate market data for demo purposes
-  return simulateMarketData(symbol);
+  // Fetch real market data from exchange
+  try {
+    return await fetchRealMarketData(symbol);
+  } catch (error) {
+    logError('Failed to fetch real market data, service unavailable', error);
+    throw new Error('Market data service unavailable');
+  }
 };
 
 /**
- * Simulate market data for demo purposes
+ * Fetch real Bitcoin market data from Coinbase API (FIX alternative)
+ * Uses REST API as fallback when FIX connection is not available
  */
-const simulateMarketData = (symbol) => {
-  const basePrice = 60000 + (Math.random() * 10000 - 5000);
-  const spread = basePrice * 0.0005; // 0.05% spread
-
-  const marketData = {
-    symbol,
-    timestamp: new Date(),
-    bid: basePrice - spread/2,
-    ask: basePrice + spread/2,
-    last: basePrice,
-    mid: basePrice,
-    volume: 10 + Math.random() * 100,
-    receivedAt: new Date(),
-    simulated: true // Flag to indicate this is simulated data
-  };
-
-  // Cache the simulated data
-  marketDataCache.set(symbol, marketData);
-
-  return marketData;
+const fetchRealMarketData = async (symbol) => {
+  try {
+    // Use Coinbase Pro REST API to get real-time market data
+    const https = require('https');
+    const symbolMap = {
+      'BTC/USD': 'BTC-USD',
+      'BTCUSD': 'BTC-USD',
+      'BTC-USD': 'BTC-USD'
+    };
+    
+    const product = symbolMap[symbol] || 'BTC-USD';
+    
+    // Fetch ticker data
+    const tickerPromise = new Promise((resolve, reject) => {
+      https.get(`https://api.exchange.coinbase.com/products/${product}/ticker`, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }).on('error', reject);
+    });
+    
+    const tickerData = await tickerPromise;
+    
+    // Parse real market data
+    const marketData = {
+      symbol,
+      timestamp: new Date(tickerData.time),
+      bid: parseFloat(tickerData.bid) || 0,
+      ask: parseFloat(tickerData.ask) || 0,
+      last: parseFloat(tickerData.price),
+      mid: (parseFloat(tickerData.bid) + parseFloat(tickerData.ask)) / 2,
+      volume: parseFloat(tickerData.volume) || 0,
+      receivedAt: new Date(),
+      simulated: false // Real data from exchange
+    };
+    
+    // Cache the market data
+    marketDataCache.set(symbol, marketData);
+    
+    logMessage(`Fetched real market data for ${symbol}: $${marketData.last.toFixed(2)}`);
+    
+    return marketData;
+  } catch (error) {
+    logError('Error fetching real market data:', error);
+    throw error;
+  }
 };
 
 /**
@@ -347,10 +385,84 @@ const scheduleMarketDataUpdates = (io) => {
   logMessage(`Scheduled market data updates every ${updateInterval/1000} seconds`);
 };
 
+/**
+ * Fetch historical Bitcoin market data for Python models
+ * @param {string} symbol - Trading pair symbol
+ * @param {number} granularity - Candle granularity in seconds (60, 300, 900, 3600, 21600, 86400)
+ * @param {number} limit - Number of data points to fetch (max 300 per request)
+ * @returns {Promise<Array>} Array of historical candle data
+ */
+const getHistoricalMarketData = async (symbol = 'BTC/USD', granularity = 60, limit = 300) => {
+  try {
+    const https = require('https');
+    const symbolMap = {
+      'BTC/USD': 'BTC-USD',
+      'BTCUSD': 'BTC-USD',
+      'BTC-USD': 'BTC-USD'
+    };
+    
+    const product = symbolMap[symbol] || 'BTC-USD';
+    
+    // Calculate time range for historical data
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - (limit * granularity * 1000));
+    
+    logMessage(`Fetching ${limit} candles of ${granularity}s granularity for ${symbol}`);
+    
+    // Fetch candles data from Coinbase
+    const candlesPromise = new Promise((resolve, reject) => {
+      const params = new URLSearchParams({
+        start: startTime.toISOString(),
+        end: endTime.toISOString(),
+        granularity: granularity.toString()
+      });
+      
+      const url = `https://api.exchange.coinbase.com/products/${product}/candles?${params}`;
+      
+      https.get(url, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }).on('error', reject);
+    });
+    
+    const candlesData = await candlesPromise;
+    
+    // Transform candles data to standard format
+    // Coinbase format: [timestamp, low, high, open, close, volume]
+    const historicalData = candlesData.map(candle => ({
+      timestamp: new Date(candle[0] * 1000),
+      open: candle[3],
+      high: candle[2],
+      low: candle[1],
+      close: candle[4],
+      volume: candle[5],
+      price: candle[4] // Use close price as the price
+    }));
+    
+    // Sort by timestamp (oldest first)
+    historicalData.sort((a, b) => a.timestamp - b.timestamp);
+    
+    logMessage(`Successfully fetched ${historicalData.length} historical data points`);
+    
+    return historicalData;
+  } catch (error) {
+    logError('Error fetching historical market data:', error);
+    throw error;
+  }
+};
+
 module.exports = {
   initializeFixSession,
   subscribeToMarketData,
   sendOrder,
   getMarketData,
-  scheduleMarketDataUpdates
+  scheduleMarketDataUpdates,
+  getHistoricalMarketData
 };

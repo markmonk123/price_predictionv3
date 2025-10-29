@@ -19,8 +19,12 @@ const runPredictionModel = async () => {
   try {
     logMessage('Running Bitcoin prediction model...');
 
-    // Get latest market data
+    // Get latest market data from FIX service (real data)
     const marketData = await fixService.getMarketData('BTC/USD');
+    
+    if (marketData.simulated) {
+      logMessage('Warning: Using simulated market data for prediction');
+    }
 
     // Options for Python shell
     const options = {
@@ -48,11 +52,12 @@ const runPredictionModel = async () => {
         const prediction = results[0];
         logMessage(`Prediction model result: ${JSON.stringify(prediction)}`);
 
-        // Cache prediction result
+        // Cache prediction result with market data context
         predictionCache.set('latest', {
           ...prediction,
           timestamp: new Date(),
-          price: marketData.last
+          price: marketData.last,
+          simulated: false  // Using real market data for prediction
         });
 
         resolve(prediction);
@@ -60,7 +65,7 @@ const runPredictionModel = async () => {
     });
   } catch (error) {
     logError('Error in prediction model execution:', error);
-    return simulatePrediction();
+    throw error;
   }
 };
 
@@ -74,53 +79,12 @@ const getLatestPrediction = async () => {
     return cachedPrediction;
   }
 
-  // If no cached prediction, generate a new one
-  return simulatePrediction();
-};
-
-/**
- * Simulate prediction for demo purposes
- */
-const simulatePrediction = async () => {
+  // If no cached prediction, run the model to generate a new one
   try {
-    const marketData = await fixService.getMarketData('BTC/USD');
-
-    // Calculate random prediction probabilities
-    const increaseProbability = Math.random() * 0.5 + 0.25; // 25-75%
-    const decreaseProbability = Math.random() * 0.5 + 0.25; // 25-75%
-    const noChangeProbability = 1 - increaseProbability - decreaseProbability;
-
-    // Determine predicted direction based on highest probability
-    let predictedDirection;
-    if (increaseProbability > decreaseProbability && increaseProbability > noChangeProbability) {
-      predictedDirection = 1; // Increase
-    } else if (decreaseProbability > increaseProbability && decreaseProbability > noChangeProbability) {
-      predictedDirection = -1; // Decrease
-    } else {
-      predictedDirection = 0; // No change
-    }
-
-    // Create prediction object
-    const prediction = {
-      price: marketData.last,
-      timestamp: new Date(),
-      predicted_direction: predictedDirection,
-      increase_probability: increaseProbability,
-      decrease_probability: decreaseProbability,
-      no_change_probability: noChangeProbability,
-      confidence: Math.max(increaseProbability, decreaseProbability, noChangeProbability),
-      timeframe: '1 minute',
-      threshold: 0.002, // 0.2%
-      simulated: true // Flag to indicate this is simulated
-    };
-
-    // Cache the prediction
-    predictionCache.set('latest', prediction);
-
-    return prediction;
+    return await runPredictionModel();
   } catch (error) {
-    logError('Error simulating prediction:', error);
-    throw error;
+    logError('Unable to generate prediction:', error);
+    throw new Error('Prediction service unavailable - please ensure FIX service and Python environment are running');
   }
 };
 
@@ -153,49 +117,9 @@ const schedulePredictions = (io) => {
 const getHistoricalPredictions = async (timeframe = '1h') => {
   try {
     // In a real implementation, this would query a database
-    // For demo purposes, we'll generate simulated historical data
-
-    const numDataPoints = timeframe === '1h' ? 60 : 
-                          timeframe === '1d' ? 24 * 60 : 
-                          timeframe === '1w' ? 7 * 24 * 60 : 60;
-
-    const currentPrice = (await fixService.getMarketData('BTC/USD')).last;
-    const predictions = [];
-
-    // Generate simulated historical predictions
-    for (let i = 0; i < numDataPoints; i++) {
-      const timestamp = new Date(Date.now() - (i * 60 * 1000)); // Go back i minutes
-      const priceDelta = (Math.random() - 0.5) * 100; // Random price change
-      const price = currentPrice - priceDelta * i / 10;
-
-      const increaseProbability = Math.random() * 0.5 + 0.25;
-      const decreaseProbability = Math.random() * 0.5 + 0.25;
-      const noChangeProbability = 1 - increaseProbability - decreaseProbability;
-
-      let predictedDirection;
-      if (increaseProbability > decreaseProbability && increaseProbability > noChangeProbability) {
-        predictedDirection = 1;
-      } else if (decreaseProbability > increaseProbability && decreaseProbability > noChangeProbability) {
-        predictedDirection = -1;
-      } else {
-        predictedDirection = 0;
-      }
-
-      predictions.push({
-        price,
-        timestamp,
-        predicted_direction: predictedDirection,
-        increase_probability: increaseProbability,
-        decrease_probability: decreaseProbability,
-        no_change_probability: noChangeProbability,
-        confidence: Math.max(increaseProbability, decreaseProbability, noChangeProbability),
-        timeframe: '1 minute',
-        threshold: 0.002,
-        simulated: true
-      });
-    }
-
-    return predictions.reverse(); // Most recent first
+    // For now, return empty array since we don't have historical predictions stored
+    logMessage('Historical predictions not yet implemented - requires database storage');
+    return [];
   } catch (error) {
     logError('Error getting historical predictions:', error);
     throw error;

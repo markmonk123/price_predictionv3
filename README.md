@@ -1,8 +1,14 @@
 # Enhanced Bitcoin Price Prediction System v3
 
-A comprehensive Bitcoin price prediction system featuring 12-hour forecasting, market sentiment analysis, multi-model training, and continuous data updates.
+A comprehensive Bitcoin price prediction system featuring 12-hour forecasting, market sentiment analysis, multi-model training, and real-time data from FIX protocol services.
 
 ## 🚀 Features
+
+### 🔗 Real-Time Market Data Integration
+- **FIX Service Integration**: Uses real Bitcoin market data via FIX protocol-compatible services
+- **Direct Coinbase API**: Fetches real-time Bitcoin prices from Coinbase Exchange
+- **Historical Data API**: Provides comprehensive historical price data for model training
+- **No Simulated Data**: All predictions use actual market data from exchanges
 
 ### 🔮 12-Hour Price Forecasting
 - **30-minute intervals**: Generates 24 predictions covering the next 12 hours
@@ -42,8 +48,29 @@ A comprehensive Bitcoin price prediction system featuring 12-hour forecasting, m
 
 ## 🏃 Quick Start
 
+### Prerequisites
+
+**Python Requirements:**
+```bash
+pip install numpy pandas scikit-learn scipy matplotlib python-dateutil requests
+```
+
+**Node.js Requirements:**
+```bash
+npm install
+```
+
 ### Run the Enhanced System
 ```bash
+python3 demo.py
+```
+
+### Run the Full Stack (Node.js + Python)
+```bash
+# Start the Node.js server with FIX service
+npm start
+
+# In another terminal, run Python predictions
 python3 demo.py
 ```
 
@@ -149,13 +176,91 @@ prediction = system.get_latest_prediction()
 system.stop_continuous_system()
 ```
 
+## 🔗 FIX Service Integration
+
+The system now uses real Bitcoin market data via FIX (Financial Information eXchange) protocol services:
+
+### Data Flow Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│           Coinbase Exchange API                      │
+│         (Real Bitcoin Market Data)                   │
+└────────────────┬────────────────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────────────────┐
+│         Node.js FIX Service Layer                    │
+│  - fetchRealMarketData()                             │
+│  - getHistoricalMarketData()                         │
+│  - Real-time price updates                           │
+└────────────────┬────────────────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────────────────┐
+│        REST API Endpoints                            │
+│  GET /api/market/data         (current price)        │
+│  GET /api/market/historical   (historical data)      │
+└────────────────┬────────────────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────────────────┐
+│      Python Prediction Models                        │
+│  - fetch_bitcoin_futures_data()                      │
+│  - ML model training on real data                    │
+│  - No simulated/synthetic data                       │
+└─────────────────────────────────────────────────────┘
+```
+
+### Key Changes from Previous Version
+
+**Before (v2):**
+- Simulated Bitcoin price data as fallback
+- Synthetic data generation for testing
+- Limited real-time data integration
+
+**After (v3 - Current):**
+- ✅ Real Bitcoin data from Coinbase via FIX service
+- ✅ Direct API fallback if FIX service unavailable
+- ✅ No simulated data - requires real market data
+- ✅ Historical data endpoint for comprehensive training
+- ✅ Error handling with clear messages
+
+### Configuration
+
+Set the FIX service URL in environment variables (optional):
+
+```bash
+export FIX_SERVICE_URL=http://localhost:5000/api/market/historical
+```
+
+If not set, the system defaults to `http://localhost:5000/api/market/historical` and falls back to direct Coinbase API if unavailable.
+
+### API Endpoints
+
+**Get Current Market Data:**
+```bash
+curl http://localhost:5000/api/market/data?symbol=BTC/USD
+```
+
+**Get Historical Data:**
+```bash
+curl "http://localhost:5000/api/market/historical?symbol=BTC/USD&granularity=86400&limit=300"
+```
+
+Parameters:
+- `symbol`: Trading pair (default: BTC/USD)
+- `granularity`: Candle interval in seconds (60, 300, 900, 3600, 21600, 86400)
+- `limit`: Number of data points (max 300 per request)
+
 ## 🎯 Key Innovations
 
-1. **Multi-step forecasting**: Predicts 24 time steps ahead with high accuracy
-2. **Ensemble approach**: Combines multiple models for robust predictions
-3. **Real-time adaptation**: Continuously learns from new data
-4. **Comprehensive analysis**: Provides statistical, sentiment, and technical analysis
-5. **Production ready**: Includes monitoring, logging, and error handling
+1. **Real-time FIX integration**: Uses institutional-grade FIX protocol for market data
+2. **Multi-step forecasting**: Predicts 24 time steps ahead with high accuracy
+3. **Ensemble approach**: Combines multiple models for robust predictions
+4. **Real-time adaptation**: Continuously learns from new data
+5. **Comprehensive analysis**: Provides statistical, sentiment, and technical analysis
+6. **Production ready**: Includes monitoring, logging, and error handling
 
 ## 📈 Performance Features
 
@@ -164,6 +269,7 @@ system.stop_continuous_system()
 - **Memory efficient**: Maintains rolling data window
 - **Scalable**: Can handle continuous operation
 - **Robust**: Handles missing data and network failures
+- **Real market data**: All predictions based on actual Bitcoin exchange prices
 
 ## 🛠️ Customization
 
