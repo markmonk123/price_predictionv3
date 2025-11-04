@@ -9,8 +9,9 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor
 from sklearn.ensemble import VotingRegressor
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.preprocessing import StandardScaler
 from datetime import datetime, timedelta
 import warnings
 import time
@@ -28,6 +29,8 @@ class EnhancedBitcoinForecaster:
         self.is_training = False
         self.last_update = None
         self.latest_data = None
+        self.feature_scaler = None
+        self.feature_columns = []
         
         # Initialize multiple models for ensemble
         self.models = {
@@ -152,28 +155,34 @@ class EnhancedBitcoinForecaster:
         
         X = prepared_df[feature_cols]
         # For now, train on 1-step ahead target, but we'll use recursive prediction
-        y = prepared_df['target_1'] 
-        
+        y = prepared_df['target_1']
+
         # Train-test split
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, shuffle=False
         )
-        
+
+        # Normalize features before training
+        self.feature_columns = feature_cols
+        self.feature_scaler = StandardScaler()
+        X_train_scaled = self.feature_scaler.fit_transform(X_train)
+        X_test_scaled = self.feature_scaler.transform(X_test)
+
         self.trained_models = {}
         model_scores = {}
-        
+
         print(f"   📊 Training on {len(X_train)} samples, testing on {len(X_test)} samples")
-        
+
         # Train each model
         for name, model in self.models.items():
             try:
                 print(f"   🔄 Training {name}...", end=' ')
-                
+
                 # Train model
-                model.fit(X_train, y_train)
-                
+                model.fit(X_train_scaled, y_train)
+
                 # Evaluate
-                y_pred = model.predict(X_test)
+                y_pred = model.predict(X_test_scaled)
                 mse = mean_squared_error(y_test, y_pred)
                 mae = mean_absolute_error(y_test, y_pred)
                 
@@ -194,10 +203,15 @@ class EnhancedBitcoinForecaster:
         """Use recursive prediction to forecast multiple steps ahead."""
         predictions = []
         current_X = X_initial.copy()
-        
+
+        if self.feature_scaler is None:
+            raise ValueError("Feature scaler has not been fitted.")
+
         for step in range(steps):
             # Predict next value
-            next_pred = model.predict(current_X.tail(1))[0]
+            latest_features = current_X.tail(1)[self.feature_columns]
+            scaled_features = self.feature_scaler.transform(latest_features)
+            next_pred = model.predict(scaled_features)[0]
             predictions.append(next_pred)
             
             # Update features for next prediction
@@ -233,12 +247,16 @@ class EnhancedBitcoinForecaster:
         # Prepare the latest data
         latest_data = self._drop_normalized_columns(latest_data)
         df_prep, feature_cols, _ = self.prepare_multistep_data(latest_data)
-        
+
         if len(df_prep) == 0:
             print("   ❌ Unable to prepare data for prediction")
             return None
-        
-        X_latest = df_prep[feature_cols].tail(50)  # Use last 50 points for context
+
+        # Align with the scaler feature order and keep raw values for recursive updates
+        if not self.feature_columns:
+            self.feature_columns = feature_cols
+
+        X_latest = df_prep[self.feature_columns].tail(50)  # Use last 50 points for context
         
         # Generate predictions from each model
         ensemble_predictions = []

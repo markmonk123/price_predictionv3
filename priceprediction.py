@@ -8,6 +8,7 @@ from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.preprocessing import StandardScaler
 from scipy import stats
 import matplotlib.pyplot as plt
 import requests
@@ -107,7 +108,13 @@ def enhanced_bitcoin_prediction_with_denormalized_data():
     X_train_selected = selector.fit_transform(X_train, y_train)
     X_test_selected = selector.transform(X_test)
     X_latest_selected = selector.transform(X_latest)
-    
+
+    # Normalize the selected feature set before model training
+    feature_scaler = StandardScaler()
+    X_train_scaled = feature_scaler.fit_transform(X_train_selected)
+    X_test_scaled = feature_scaler.transform(X_test_selected)
+    X_latest_scaled = feature_scaler.transform(X_latest_selected)
+
     selected_features = [feature_columns[i] for i in selector.get_support(indices=True)]
     print(f"✅ Selected {len(selected_features)} most informative denormalized features")
     
@@ -177,15 +184,15 @@ def enhanced_bitcoin_prediction_with_denormalized_data():
         start_time = time.time()
         
         try:
-            model.fit(X_train_selected, y_train)
+            model.fit(X_train_scaled, y_train)
             training_time = time.time() - start_time
-            
+
             # Evaluate on test set
-            test_predictions = model.predict(X_test_selected)
+            test_predictions = model.predict(X_test_scaled)
             test_accuracy = accuracy_score(y_test, test_predictions)
-            
+
             # Cross-validation score
-            cv_scores = cross_val_score(model, X_train_selected, y_train, cv=3, scoring='accuracy')
+            cv_scores = cross_val_score(model, X_train_scaled, y_train, cv=3, scoring='accuracy')
             cv_mean = cv_scores.mean()
             cv_std = cv_scores.std()
             
@@ -214,24 +221,48 @@ def enhanced_bitcoin_prediction_with_denormalized_data():
     )
     
     print(f"   🤖 Ensemble models: {[name for name, _ in ensemble_models]}")
-    ensemble.fit(X_train_selected, y_train)
-    
+    ensemble.fit(X_train_scaled, y_train)
+
     # Final ensemble evaluation
-    ensemble_predictions = ensemble.predict(X_test_selected)
+    ensemble_predictions = ensemble.predict(X_test_scaled)
     ensemble_accuracy = accuracy_score(y_test, ensemble_predictions)
     print(f"   ✅ Ensemble accuracy: {ensemble_accuracy:.3f}")
-    
+
     # Generate final prediction on latest data (denormalized)
     print("\n🔮 Generating prediction with denormalized data...")
-    latest_prediction = ensemble.predict(X_latest_selected)[0]
-    latest_probabilities = ensemble.predict_proba(X_latest_selected)[0]
+    latest_prediction = ensemble.predict(X_latest_scaled)[0]
+    latest_probabilities = ensemble.predict_proba(X_latest_scaled)[0]
     confidence = np.max(latest_probabilities)
+    probability_map = dict(zip(ensemble.classes_, latest_probabilities))
+    long_confidence = probability_map.get(1, 0.0)
+    short_confidence = probability_map.get(-1, 0.0)
     
     # Interpret prediction
     prediction_labels = {-1: "📉 DECREASE ≥1.0%", 0: "➡️ NO SIGNIFICANT CHANGE", 1: "📈 INCREASE ≥1.0%"}
     prediction_label = prediction_labels[latest_prediction]
     
     current_price = latest_data['price'].iloc[0]
+    target_price_up = current_price * 1.01
+    target_price_down = current_price * 0.99
+    long_gain = max(target_price_up - current_price, 0.0)
+    short_gain = max(current_price - target_price_down, 0.0)
+    long_score = long_gain * long_confidence
+    short_score = short_gain * short_confidence
+    if long_score > short_score:
+        recommended_position = "LONG"
+        recommended_target = target_price_up
+        recommended_gain = long_gain
+        recommended_confidence = long_confidence
+    elif short_score > long_score:
+        recommended_position = "SHORT"
+        recommended_target = target_price_down
+        recommended_gain = short_gain
+        recommended_confidence = short_confidence
+    else:
+        recommended_position = "HOLD"
+        recommended_target = current_price
+        recommended_gain = 0.0
+        recommended_confidence = max(long_confidence, short_confidence)
     
     print(f"\n🎯 FINAL PREDICTION RESULTS:")
     print(f"   💰 Current Price: ${current_price:.2f}")
@@ -240,6 +271,14 @@ def enhanced_bitcoin_prediction_with_denormalized_data():
     print(f"   🤖 Models Used: {len(ensemble_models)}")
     print(f"   📊 Features Used: {len(selected_features)} (denormalized)")
     print(f"   ⚡ GPU Optimized: {gpu_results['gpu_info']['cuda_available']}")
+
+    print("\n💼 Trade Opportunity Analysis:")
+    print(f"   📈 Long Position  -> Target: ${target_price_up:,.2f} | Potential Gain: ${long_gain:,.2f} | Confidence: {long_confidence:.1%}")
+    print(f"   📉 Short Position -> Target: ${target_price_down:,.2f} | Potential Gain: ${short_gain:,.2f} | Confidence: {short_confidence:.1%}")
+    if recommended_position == "HOLD":
+        print("   ⚖️  Recommendation: Hold position – no clear edge between long/short opportunities")
+    else:
+        print(f"   ✅ Recommendation: {recommended_position} with target ${recommended_target:,.2f} (Gain: ${recommended_gain:,.2f}, Confidence: {recommended_confidence:.1%})")
     
     # Return comprehensive results
     results = {
@@ -247,6 +286,26 @@ def enhanced_bitcoin_prediction_with_denormalized_data():
         'prediction_label': prediction_label,
         'confidence': confidence,
         'current_price': current_price,
+        'trade_analysis': {
+            'long': {
+                'target_price': target_price_up,
+                'potential_gain': long_gain,
+                'confidence': long_confidence,
+                'score': long_score
+            },
+            'short': {
+                'target_price': target_price_down,
+                'potential_gain': short_gain,
+                'confidence': short_confidence,
+                'score': short_score
+            },
+            'recommendation': {
+                'position': recommended_position,
+                'target_price': recommended_target,
+                'potential_gain': recommended_gain,
+                'confidence': recommended_confidence
+            }
+        },
         'model_results': model_results,
         'ensemble_accuracy': ensemble_accuracy,
         'features_used': len(selected_features),
@@ -1123,6 +1182,9 @@ def main():
     next_prediction = ensemble.predict(X_latest_selected)[0]
     next_probabilities = ensemble.predict_proba(X_latest_selected)[0]
     next_confidence = np.max(next_probabilities)
+    probability_map = dict(zip(ensemble.classes_, next_probabilities))
+    long_confidence = probability_map.get(1, 0.0)
+    short_confidence = probability_map.get(-1, 0.0)
     
     # Get current price and date
     current_price = latest_data['price'].iloc[0]
@@ -1137,6 +1199,25 @@ def main():
     # Calculate target prices for 1.0% moves
     target_price_up = current_price * 1.01
     target_price_down = current_price * 0.99
+    long_gain = max(target_price_up - current_price, 0.0)
+    short_gain = max(current_price - target_price_down, 0.0)
+    long_score = long_gain * long_confidence
+    short_score = short_gain * short_confidence
+    if long_score > short_score:
+        recommended_position = "LONG"
+        recommended_target = target_price_up
+        recommended_gain = long_gain
+        recommended_confidence = long_confidence
+    elif short_score > long_score:
+        recommended_position = "SHORT"
+        recommended_target = target_price_down
+        recommended_gain = short_gain
+        recommended_confidence = short_confidence
+    else:
+        recommended_position = "HOLD"
+        recommended_target = current_price
+        recommended_gain = 0.0
+        recommended_confidence = max(long_confidence, short_confidence)
     
     print(f"🎯 NEXT MOVE PREDICTION:")
     print(f"   Current Price: ${current_price:,.2f}")
@@ -1146,12 +1227,20 @@ def main():
     
     if next_prediction == 1:
         print(f"   📈 Target Price (1.0% up): ${target_price_up:,.2f}")
-        print(f"   💰 Expected Gain: ${target_price_up - current_price:,.2f}")
+        print(f"   💰 Potential Gain: ${long_gain:,.2f}")
     elif next_prediction == -1:
         print(f"   📉 Target Price (1.0% down): ${target_price_down:,.2f}")
-        print(f"   ⚠️  Expected Loss: ${current_price - target_price_down:,.2f}")
+        print(f"   💰 Potential Gain (short): ${short_gain:,.2f}")
     else:
         print(f"   ➡️  Price expected to stay between ${target_price_down:,.2f} and ${target_price_up:,.2f}")
+
+    print("\n💼 Trade Opportunity Analysis:")
+    print(f"   📈 Long Position  -> Target: ${target_price_up:,.2f} | Potential Gain: ${long_gain:,.2f} | Confidence: {long_confidence:.1%}")
+    print(f"   📉 Short Position -> Target: ${target_price_down:,.2f} | Potential Gain: ${short_gain:,.2f} | Confidence: {short_confidence:.1%}")
+    if recommended_position == "HOLD":
+        print("   ⚖️  Recommendation: Hold position – no clear edge between long/short opportunities")
+    else:
+        print(f"   ✅ Recommendation: {recommended_position} with target ${recommended_target:,.2f} (Gain: ${recommended_gain:,.2f}, Confidence: {recommended_confidence:.1%})")
     
     # Blockchain context for prediction
     if 'estimated_conf_time' in latest_data.columns:
