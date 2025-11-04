@@ -301,32 +301,45 @@ def main():
     test_df = df.iloc[-len(y_test):].copy()
     test_df['predicted'] = y_pred
     test_df['confidence'] = confidence
-    
-    print(f"\n🎯 Bitcoin 0.2% Shift Predictions:")
-    print("=" * 80)
-    
-    # High confidence predictions
-    high_conf_predictions = test_df[
-        (test_df['predicted'] != 0) & (test_df['confidence'] >= 0.7)
-    ]
-    
-    if len(high_conf_predictions) > 0:
-        print(f"🔥 High Confidence Predictions (≥70%):")
-        for _, row in high_conf_predictions.iterrows():
-            direction = "📈 INCREASE" if row['predicted'] == 1 else "📉 DECREASE"
-            timestamp = row['date'].strftime('%Y-%m-%d %H:%M:%S')
-            print(f"   Price ${row['price']:.2f} | {direction} by 0.2% | Confidence: {row['confidence']:.1%} | {timestamp}")
+    test_df['future_price'] = test_df['future_price']  # Already present
+
+    # Find high-confidence long and short signals
+    long_signals = test_df[(test_df['predicted'] == 1) & (test_df['confidence'] >= 0.7)]
+    short_signals = test_df[(test_df['predicted'] == -1) & (test_df['confidence'] >= 0.7)]
+
+    # Get the best long and short signal by confidence
+    best_long = long_signals.sort_values('confidence', ascending=False).head(1)
+    best_short = short_signals.sort_values('confidence', ascending=False).head(1)
+
+    # Decide which to take: long or short
+    if not best_long.empty and not best_short.empty:
+        # Compare confidence, then expected return
+        if best_long['confidence'].values[0] >= best_short['confidence'].values[0]:
+            best_trade = best_long
+            direction = "LONG (Buy)"
+        else:
+            best_trade = best_short
+            direction = "SHORT (Sell)"
+    elif not best_long.empty:
+        best_trade = best_long
+        direction = "LONG (Buy)"
+    elif not best_short.empty:
+        best_trade = best_short
+        direction = "SHORT (Sell)"
     else:
-        print("⚠️  No high-confidence significant moves predicted")
-    
-    # All predictions
-    print(f"\n📋 All Test Predictions:")
-    for _, row in test_df.iterrows():
-        direction_map = {1: "Increase", -1: "Decrease", 0: "No Change"}
-        direction = direction_map[row['predicted']]
-        timestamp = row['date'].strftime('%Y-%m-%d %H:%M:%S')
-        print(f"Price ${row['price']:.2f} | Confidence: {row['confidence']:.3f} | {direction} by 0.2% {timestamp}")
-    
+        print("⚠️ No high-confidence trade signals found.")
+        return
+
+    # Output target price and direction
+    row = best_trade.iloc[0]
+    print(f"\n🚩 Target Trade Signal:")
+    print(f"   Direction: {direction}")
+    print(f"   Entry Price: ${row['price']:.2f}")
+    print(f"   Target Price (next interval): ${row['future_price']:.2f}")
+    print(f"   Confidence: {row['confidence']:.1%}")
+    print(f"   Timestamp: {row['date'].strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"   Expected Return: {(row['future_price'] - row['price']) / row['price'] * 100:.2f}%")
+
     # Cross-validation
     cv_scores = cross_val_score(ensemble, X_train, y_train, cv=5, scoring='accuracy')
     print(f"\n🔄 Cross-Validation:")
