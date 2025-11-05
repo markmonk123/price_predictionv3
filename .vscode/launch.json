@@ -5,6 +5,22 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "type": "dockerfile",
+            "request": "launch",
+            "name": "Docker: Build",
+            "dockerfile": "Dockerfile",
+            "contextPath": "${workspaceFolder}"
+        },
+        {
+            "type": "pydevd",
+            "name": "PyDev Debug (Launch)",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "program": "priceprediction.py",
+            "args": ""
+        },
+        {
             "name": "Launch via NPM",
             "request": "launch",
             "runtimeArgs": [
