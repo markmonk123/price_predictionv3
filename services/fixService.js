@@ -17,6 +17,10 @@ try {
 }
 
 const marketDataCache = new NodeCache({ stdTTL: 300 });
+const MARKET_DATA_REFRESH_MS = 5000;
+
+let marketDataIntervalHandle = null;
+let fixInitializationPromise = null;
 
 const FIX_MSG_TYPES = {
   MARKET_DATA_REQUEST: 'V',
@@ -101,66 +105,88 @@ const initializeFixSession = async () => {
     return false;
   }
 
-  if (fixClient) {
-    return isConnected;
-  }
-
-  try {
-    logMessage('Initializing QuickFIX initiator...');
-
-    const initiatorOptions = {
-      propertiesFile: FIX_CONFIG_PATH,
-      storeFactory: process.env.FIX_STORE_FACTORY || 'file'
-    };
-
-    if (process.env.FIX_USE_SSL) {
-      initiatorOptions.ssl = process.env.FIX_USE_SSL === 'true';
-    }
-
-    if (process.env.FIX_USERNAME && process.env.FIX_PASSWORD) {
-      initiatorOptions.credentials = {
-        username: process.env.FIX_USERNAME,
-        password: process.env.FIX_PASSWORD
-      };
-    }
-
-    fixClient = new quickfix.initiator({
-      onCreate: (sessionID) => {
-        logMessage(`FIX session created: ${sessionID}`);
-      },
-      onLogon: (sessionID) => {
-        logMessage(`FIX session logged on: ${sessionID}`);
-        isConnected = true;
-        subscribeToMarketData(DEFAULT_SYMBOL);
-      },
-      onLogout: (sessionID) => {
-        logMessage(`FIX session logged out: ${sessionID}`);
-        isConnected = false;
-      },
-      onLogonAttempt: (message, sessionID) => {
-        logMessage(`FIX logon attempt for ${sessionID}: ${JSON.stringify(message)}`);
-      },
-      toAdmin: (message, sessionID) => {
-        logMessage(`Sending admin message [${sessionID}]: ${JSON.stringify(message)}`);
-      },
-      fromAdmin: (message, sessionID) => {
-        logMessage(`Received admin message [${sessionID}]: ${JSON.stringify(message)}`);
-      },
-      fromApp: (message, sessionID) => {
-        logMessage(`Received application message [${sessionID}]: ${JSON.stringify(message)}`);
-        processIncomingMessage(message);
-      }
-    }, initiatorOptions);
-
-    await startInitiator(fixClient);
-    logMessage('QuickFIX initiator started successfully');
+  if (isConnected) {
     return true;
-  } catch (error) {
-    logError('Error initializing FIX session:', error);
-    fixClient = null;
-    isConnected = false;
-    return false;
   }
+
+  if (fixInitializationPromise) {
+    return fixInitializationPromise;
+  }
+
+  const performInitialization = async () => {
+    try {
+      if (fixClient) {
+        await startInitiator(fixClient);
+        return true;
+      }
+
+      logMessage('Initializing QuickFIX initiator...');
+
+      const initiatorOptions = {
+        propertiesFile: FIX_CONFIG_PATH,
+        storeFactory: process.env.FIX_STORE_FACTORY || 'file'
+      };
+
+      if (process.env.FIX_USE_SSL) {
+        initiatorOptions.ssl = process.env.FIX_USE_SSL === 'true';
+      }
+
+      if (process.env.FIX_USERNAME && process.env.FIX_PASSWORD) {
+        initiatorOptions.credentials = {
+          username: process.env.FIX_USERNAME,
+          password: process.env.FIX_PASSWORD
+        };
+      }
+
+      fixClient = new quickfix.initiator({
+        onCreate: (sessionID) => {
+          logMessage(`FIX session created: ${sessionID}`);
+        },
+        onLogon: (sessionID) => {
+          logMessage(`FIX session logged on: ${sessionID}`);
+          isConnected = true;
+          subscribeToMarketData(DEFAULT_SYMBOL);
+        },
+        onLogout: (sessionID) => {
+          logMessage(`FIX session logged out: ${sessionID}`);
+          isConnected = false;
+        },
+        onLogonAttempt: (message, sessionID) => {
+          logMessage(`FIX logon attempt for ${sessionID}: ${JSON.stringify(message)}`);
+        },
+        toAdmin: (message, sessionID) => {
+          logMessage(`Sending admin message [${sessionID}]: ${JSON.stringify(message)}`);
+        },
+        fromAdmin: (message, sessionID) => {
+          logMessage(`Received admin message [${sessionID}]: ${JSON.stringify(message)}`);
+        },
+        fromApp: (message, sessionID) => {
+          logMessage(`Received application message [${sessionID}]: ${JSON.stringify(message)}`);
+          processIncomingMessage(message);
+        }
+      }, initiatorOptions);
+
+      await startInitiator(fixClient);
+      logMessage('QuickFIX initiator started successfully');
+      return true;
+    } catch (error) {
+      logError('Error initializing FIX session:', error);
+      fixClient = null;
+      isConnected = false;
+      return false;
+    }
+  };
+
+  fixInitializationPromise = performInitialization()
+    .catch((error) => {
+      logError('FIX initialization failure:', error);
+      throw error;
+    })
+    .finally(() => {
+      fixInitializationPromise = null;
+    });
+
+  return fixInitializationPromise;
 };
 
 const processIncomingMessage = (message) => {
@@ -342,11 +368,29 @@ const sendOrder = async (orderData) => {
 /**
  * Get latest market data
  */
+const isCacheEntryFresh = (entry) => {
+  if (!entry || !entry.receivedAt) {
+    return false;
+  }
+
+  const receivedAt = entry.receivedAt instanceof Date ? entry.receivedAt : new Date(entry.receivedAt);
+  return Date.now() - receivedAt.getTime() <= MARKET_DATA_REFRESH_MS * 2;
+};
+
 const getMarketData = async (symbol = 'BTC/USD') => {
   const cachedData = marketDataCache.get(symbol);
 
-  if (cachedData) {
+  if (isCacheEntryFresh(cachedData)) {
     return cachedData;
+  }
+
+  const connected = await initializeFixSession();
+
+  if (connected) {
+    const refreshedData = marketDataCache.get(symbol);
+    if (isCacheEntryFresh(refreshedData)) {
+      return refreshedData;
+    }
   }
 
   // If no cached data, simulate market data for demo purposes
@@ -382,23 +426,38 @@ const simulateMarketData = (symbol) => {
  * Schedule regular market data updates
  */
 const scheduleMarketDataUpdates = (io) => {
-  // Update every 5 seconds for demo purposes
-  const updateInterval = 5000;
+  if (marketDataIntervalHandle) {
+    clearInterval(marketDataIntervalHandle);
+  }
 
-  setInterval(async () => {
+  const executeUpdate = async () => {
     try {
       const marketData = await getMarketData('BTC/USD');
 
-      // Broadcast to all connected clients
       if (io) {
         io.emit('marketData', marketData);
       }
     } catch (error) {
       logError('Error in scheduled market data update:', error);
     }
-  }, updateInterval);
+  };
 
-  logMessage(`Scheduled market data updates every ${updateInterval/1000} seconds`);
+  // Trigger immediately so clients don't wait for the first interval
+  executeUpdate();
+
+  marketDataIntervalHandle = setInterval(executeUpdate, MARKET_DATA_REFRESH_MS);
+  if (typeof marketDataIntervalHandle.unref === 'function') {
+    marketDataIntervalHandle.unref();
+  }
+
+  logMessage(`Scheduled market data updates every ${MARKET_DATA_REFRESH_MS / 1000} seconds`);
+
+  return () => {
+    if (marketDataIntervalHandle) {
+      clearInterval(marketDataIntervalHandle);
+      marketDataIntervalHandle = null;
+    }
+  };
 };
 
 module.exports = {
