@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>React Environment Build Check</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 2.5rem 1.5rem;
+        background: radial-gradient(circle at 20% 20%, rgba(30, 64, 175, 0.4), transparent 55%),
+          radial-gradient(circle at 80% 0%, rgba(236, 72, 153, 0.35), transparent 50%),
+          #0f172a;
+      }
+
+      main {
+        width: min(720px, 100%);
+        border-radius: 18px;
+        padding: 2.75rem 2.25rem;
+        background: rgba(15, 23, 42, 0.8);
+        backdrop-filter: blur(12px);
+        box-shadow: 0 32px 80px rgba(15, 23, 42, 0.45);
+        border: 1px solid rgba(148, 163, 184, 0.15);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2rem, 4vw, 2.75rem);
+        letter-spacing: 0.04em;
+      }
+
+      p {
+        line-height: 1.6;
+        margin-block: 1.1rem;
+        color: rgba(226, 232, 240, 0.85);
+      }
+
+      .status-card {
+        margin-top: 2rem;
+        padding: 1.5rem;
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        background: rgba(30, 41, 59, 0.65);
+        display: grid;
+        gap: 0.75rem;
+      }
+
+      .status-card pre {
+        margin: 0;
+        font-size: 0.9rem;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: rgba(148, 163, 184, 0.9);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-top: 1.5rem;
+      }
+
+      button {
+        cursor: pointer;
+        border-radius: 999px;
+        border: none;
+        padding: 0.75rem 1.75rem;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        background: linear-gradient(135deg, #6366f1, #ec4899);
+        color: #f8fafc;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+      }
+
+      button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 18px 35px rgba(99, 102, 241, 0.35);
+      }
+
+      footer {
+        margin-top: 2rem;
+        font-size: 0.85rem;
+        color: rgba(148, 163, 184, 0.75);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>React Environment Ready</h1>
+      <p>
+        This page confirms that the React application assets are available. You can use it as a quick smoke
+        test after running <code>npm run build</code>. Click the button below to verify that the build output
+        files have been generated.
+      </p>
+      <section class="status-card">
+        <strong>Build Status</strong>
+        <pre id="status-log">Waiting for build verification…</pre>
+        <div class="actions">
+          <button id="check-build" type="button">Check Build Assets</button>
+        </div>
+      </section>
+      <footer>
+        The script queries <code>asset-manifest.json</code> and core bundles to ensure the React build output
+        is accessible from the current directory.
+      </footer>
+    </main>
+
+    <script>
+      (function () {
+        const statusLog = document.getElementById('status-log');
+        const checkButton = document.getElementById('check-build');
+
+        const updateStatus = (message, isError = false) => {
+          statusLog.textContent = message;
+          statusLog.style.color = isError ? 'rgb(248, 113, 113)' : 'rgba(148, 163, 184, 0.9)';
+        };
+
+        const reportResult = (assetName, ok) => {
+          return `${ok ? '✅' : '⚠️'} ${assetName}`;
+        };
+
+        const checkBuild = async () => {
+          updateStatus('Checking for build artifacts…');
+
+          try {
+            const response = await fetch('./asset-manifest.json', { cache: 'no-store' });
+            if (!response.ok) {
+              updateStatus(
+                'Build manifest not found. Run `npm run build` to generate the React production bundle.',
+                true
+              );
+              return;
+            }
+
+            const manifest = await response.json();
+            const requiredAssets = [
+              manifest.files?.['main.js'],
+              manifest.files?.['main.css'],
+              manifest.entrypoints?.[0]
+            ].filter(Boolean);
+
+            if (!requiredAssets.length) {
+              updateStatus('Manifest found, but no entry points are listed. Verify the build output.', true);
+              return;
+            }
+
+            const checks = await Promise.allSettled(
+              requiredAssets.map(async (asset) => {
+                const assetResponse = await fetch(`./${asset}`, { cache: 'no-store' });
+                return { asset, ok: assetResponse.ok };
+              })
+            );
+
+            const summary = checks
+              .map((result) => {
+                if (result.status !== 'fulfilled') {
+                  return reportResult(result.reason?.asset || 'unknown asset', false);
+                }
+                return reportResult(result.value.asset, result.value.ok);
+              })
+              .join('\\n');
+
+            updateStatus(`Build manifest located.\\n${summary}`);
+          } catch (error) {
+            updateStatus(
+              `Unable to read build output. Ensure the app is built and assets are served from this directory.\\n${error}`,
+              true
+            );
+          }
+        };
+
+        checkButton.addEventListener('click', checkBuild);
+        updateStatus('Ready to verify build output.');
+      })();
+    </script>
+  </body>
+</html>

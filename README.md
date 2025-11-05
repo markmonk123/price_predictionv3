@@ -52,6 +52,50 @@ A comprehensive Bitcoin price prediction system featuring 24-hour, 12-hour, and 
 python3 demo.py
 ```
 
+## 🌐 Web Application Setup
+
+The repository also includes a Node/React front end served by `server.js`.
+
+### Prerequisites
+- Node.js 18+ (installs `npm` and `npx`)
+- One terminal for the Express API, another for the React client
+
+### Install Dependencies
+```bash
+# From the repository root
+npm install
+
+# Install client dependencies
+cd client
+npm install
+```
+
+### Start the Development Stack
+```bash
+# Run backend with hot reload
+npm run dev
+
+# (Optional) start both backend and client together
+npm run dev-full
+```
+
+### Start the React Client Only
+```bash
+cd client
+npm start
+```
+
+### Build the React Client for Production
+```bash
+cd client
+npm run build
+```
+
+### Configure FIX Connectivity
+- Install QuickFIX C++ build tooling before running `npm install` so `node-quickfix` can compile.
+- Update `config/quickfix-initiator.cfg` or provide `FIX_*` environment variables (see `services/fixService.js`) to point at your broker.
+- Without a running counterparty the service falls back to simulated market data.
+
 ### Run Individual Components
 ```bash
 # Basic prediction system

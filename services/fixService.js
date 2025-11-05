@@ -1,16 +1,23 @@
 /**
  * FIX Protocol Service for Bitcoin Trading Platform
- * Implements FIX protocol for market data and order execution
+ * Implements QuickFIX (node-quickfix) for market data and order execution.
  */
 
-const QuickFIX = require('quick-fix');
+const path = require('path');
 const NodeCache = require('node-cache');
 const { logMessage, logError } = require('../utils/logger');
 
-// Cache for storing latest market data
-const marketDataCache = new NodeCache({ stdTTL: 300 }); // 5 minutes TTL
+// Attempt to load node-quickfix. If the native addon is missing we fall back to simulation mode.
+let quickfix = null;
+try {
+  // eslint-disable-next-line global-require
+  quickfix = require('node-quickfix');
+} catch (error) {
+  logMessage('node-quickfix module not available; FIX connectivity will run in simulation mode.');
+}
 
-// FIX Message Types
+const marketDataCache = new NodeCache({ stdTTL: 300 });
+
 const FIX_MSG_TYPES = {
   MARKET_DATA_REQUEST: 'V',
   MARKET_DATA_SNAPSHOT: 'W',
@@ -18,85 +25,147 @@ const FIX_MSG_TYPES = {
   EXECUTION_REPORT: '8'
 };
 
-// FIX Session configuration
-let fixSession = null;
+const FIX_IDENTIFIERS = {
+  beginString: process.env.FIX_BEGIN_STRING || 'FIX.4.4',
+  senderCompId: process.env.FIX_SENDER_COMP_ID || 'BITCOIN_PREDICTION_CLIENT',
+  targetCompId: process.env.FIX_TARGET_COMP_ID || 'EXCHANGE'
+};
+
+const FIX_CONFIG_PATH = path.join(__dirname, '..', 'config', 'quickfix-initiator.cfg');
+const DEFAULT_SYMBOL = 'BTC/USD';
+
+let fixClient = null;
 let isConnected = false;
 
-/**
- * Initialize FIX session with counterparty
- */
-const initializeFixSession = async () => {
-  try {
-    logMessage('Initializing FIX session...');
+const formatFixTimestamp = (date) => {
+  const pad = (value, size = 2) => String(value).padStart(size, '0');
+  return [
+    `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}`,
+    `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}.${pad(date.getUTCMilliseconds(), 3)}`
+  ].join('-');
+};
 
-    const fixConfig = {
-      SenderCompID: 'BITCOIN_PREDICTION_CLIENT',
-      TargetCompID: 'EXCHANGE',
-      HeartBtInt: 30,  // Heartbeat interval in seconds
-      ReconnectInterval: 5  // Reconnect interval in seconds
+const buildHeader = (msgType) => ({
+  8: FIX_IDENTIFIERS.beginString,
+  35: msgType,
+  49: FIX_IDENTIFIERS.senderCompId,
+  56: FIX_IDENTIFIERS.targetCompId
+});
+
+const startInitiator = (client) => new Promise((resolve, reject) => {
+  try {
+    client.start(() => resolve());
+  } catch (error) {
+    reject(error);
+  }
+});
+
+const getTag = (message, tag) => {
+  if (!message) {
+    return undefined;
+  }
+  if (message.tags && message.tags[tag] !== undefined) {
+    return message.tags[tag];
+  }
+  if (message.header && message.header[tag] !== undefined) {
+    return message.header[tag];
+  }
+  return undefined;
+};
+
+const findGroup = (message, index) => {
+  if (!message || !message.groups) {
+    return null;
+  }
+  return message.groups.find((group) => String(group.index) === String(index)) || null;
+};
+
+const getEntryTag = (entry, tagCandidates) => {
+  if (!entry) {
+    return undefined;
+  }
+  for (const tag of tagCandidates) {
+    if (entry[tag] !== undefined) {
+      return entry[tag];
+    }
+    if (entry.tags && entry.tags[tag] !== undefined) {
+      return entry.tags[tag];
+    }
+  }
+  return undefined;
+};
+
+const initializeFixSession = async () => {
+  if (!quickfix) {
+    logMessage('QuickFIX initiator not started because node-quickfix is unavailable.');
+    return false;
+  }
+
+  if (fixClient) {
+    return isConnected;
+  }
+
+  try {
+    logMessage('Initializing QuickFIX initiator...');
+
+    const initiatorOptions = {
+      propertiesFile: FIX_CONFIG_PATH,
+      storeFactory: process.env.FIX_STORE_FACTORY || 'file'
     };
 
-    // Create FIX initiator
-    const fixInitiator = new QuickFIX.Initiator(
-      new QuickFIX.FileStoreFactory('./fixlogs'),
-      new QuickFIX.FileLogFactory('./fixlogs'),
-      new QuickFIX.Dictionary(fixConfig)
-    );
+    if (process.env.FIX_USE_SSL) {
+      initiatorOptions.ssl = process.env.FIX_USE_SSL === 'true';
+    }
 
-    // Define application callbacks
-    const fixApplication = {
+    if (process.env.FIX_USERNAME && process.env.FIX_PASSWORD) {
+      initiatorOptions.credentials = {
+        username: process.env.FIX_USERNAME,
+        password: process.env.FIX_PASSWORD
+      };
+    }
+
+    fixClient = new quickfix.initiator({
       onCreate: (sessionID) => {
         logMessage(`FIX session created: ${sessionID}`);
-        fixSession = sessionID;
       },
       onLogon: (sessionID) => {
         logMessage(`FIX session logged on: ${sessionID}`);
         isConnected = true;
-        // Subscribe to Bitcoin market data after logon
-        subscribeToMarketData('BTC/USD');
+        subscribeToMarketData(DEFAULT_SYMBOL);
       },
       onLogout: (sessionID) => {
         logMessage(`FIX session logged out: ${sessionID}`);
         isConnected = false;
       },
+      onLogonAttempt: (message, sessionID) => {
+        logMessage(`FIX logon attempt for ${sessionID}: ${JSON.stringify(message)}`);
+      },
       toAdmin: (message, sessionID) => {
-        // Called before admin message is sent
-        logMessage(`Sending admin message: ${message.toString()}`);
+        logMessage(`Sending admin message [${sessionID}]: ${JSON.stringify(message)}`);
       },
       fromAdmin: (message, sessionID) => {
-        // Called when admin message is received
-        logMessage(`Received admin message: ${message.toString()}`);
-        return true;
-      },
-      toApp: (message, sessionID) => {
-        // Called before app message is sent
-        logMessage(`Sending app message: ${message.toString()}`);
+        logMessage(`Received admin message [${sessionID}]: ${JSON.stringify(message)}`);
       },
       fromApp: (message, sessionID) => {
-        // Called when app message is received
-        logMessage(`Received app message: ${message.toString()}`);
+        logMessage(`Received application message [${sessionID}]: ${JSON.stringify(message)}`);
         processIncomingMessage(message);
-        return true;
       }
-    };
+    }, initiatorOptions);
 
-    // Start the FIX initiator
-    fixInitiator.start();
-
-    logMessage('FIX session initialized successfully');
+    await startInitiator(fixClient);
+    logMessage('QuickFIX initiator started successfully');
     return true;
   } catch (error) {
     logError('Error initializing FIX session:', error);
+    fixClient = null;
+    isConnected = false;
     return false;
   }
 };
 
-/**
- * Process incoming FIX messages
- */
 const processIncomingMessage = (message) => {
   try {
-    const msgType = message.getHeader().getField(35); // MsgType field
+    const msgType = getTag(message, 35);
 
     switch (msgType) {
       case FIX_MSG_TYPES.MARKET_DATA_SNAPSHOT:
@@ -106,183 +175,168 @@ const processIncomingMessage = (message) => {
         processExecutionReport(message);
         break;
       default:
-        logMessage(`Unhandled message type: ${msgType}`);
+        logMessage(`Unhandled FIX message type: ${msgType}`);
     }
   } catch (error) {
     logError('Error processing incoming FIX message:', error);
   }
 };
 
-/**
- * Process market data snapshot FIX message
- */
 const processMarketDataSnapshot = (message) => {
   try {
-    // Extract relevant fields
-    const symbol = message.getField(55); // Symbol
-    const timestamp = message.getField(52); // Sending time
+    const symbol = getTag(message, 55) || DEFAULT_SYMBOL;
+    const timestamp = getTag(message, 52);
 
-    // Extract price data from different FIX fields
-    const bidPrice = message.getField(132); // BidPx
-    const askPrice = message.getField(133); // OfferPx
-    const lastPrice = message.getField(31); // LastPx
-    const volume = message.getField(32); // LastQty
+    const mdGroup = findGroup(message, 268); // NoMDEntries
+    const mdEntries = mdGroup ? mdGroup.entries || [] : [];
 
-    // Calculate mid price
-    const midPrice = (parseFloat(bidPrice) + parseFloat(askPrice)) / 2;
+    const entryByType = {};
+    mdEntries.forEach((entry) => {
+      const entryType = getEntryTag(entry, [269]);
+      if (entryType !== undefined) {
+        entryByType[entryType] = entry;
+      }
+    });
 
-    // Create market data object
+    const bidPrice = parseFloat(getEntryTag(entryByType['0'], [270, 132]));
+    const askPrice = parseFloat(getEntryTag(entryByType['1'], [270, 133]));
+    const lastPrice = parseFloat(getEntryTag(entryByType['2'], [270, 31]));
+    const volume = parseFloat(getEntryTag(entryByType['2'], [271, 32]));
+
+    if (Number.isNaN(bidPrice) || Number.isNaN(askPrice)) {
+      logMessage('Market data snapshot missing bid/ask; ignoring.');
+      return;
+    }
+
+    const midPrice = (bidPrice + askPrice) / 2;
+
     const marketData = {
       symbol,
-      timestamp: new Date(timestamp),
-      bid: parseFloat(bidPrice),
-      ask: parseFloat(askPrice),
-      last: parseFloat(lastPrice),
+      timestamp: timestamp ? new Date(timestamp) : new Date(),
+      bid: bidPrice,
+      ask: askPrice,
+      last: Number.isNaN(lastPrice) ? midPrice : lastPrice,
       mid: midPrice,
-      volume: parseFloat(volume),
-      receivedAt: new Date()
+      volume: Number.isNaN(volume) ? 0 : volume,
+      receivedAt: new Date(),
+      simulated: false
     };
 
-    // Cache the market data
     marketDataCache.set(symbol, marketData);
-
     logMessage(`Updated market data for ${symbol}: ${JSON.stringify(marketData)}`);
-
-    // If this is simulated data, we'll need to broadcast it to connected clients
-    // This would be handled in scheduleMarketDataUpdates
   } catch (error) {
     logError('Error processing market data snapshot:', error);
   }
 };
 
-/**
- * Process execution report FIX message
- */
 const processExecutionReport = (message) => {
   try {
-    // Extract relevant fields
-    const orderID = message.getField(37); // OrderID
-    const execType = message.getField(150); // ExecType
-    const ordStatus = message.getField(39); // OrdStatus
-    const symbol = message.getField(55); // Symbol
-    const side = message.getField(54); // Side (1=Buy, 2=Sell)
-    const orderQty = message.getField(38); // OrderQty
-    const price = message.getField(44); // Price
-    const transactTime = message.getField(60); // TransactTime
+    const symbol = getTag(message, 55);
+    const side = getTag(message, 54);
 
-    // Create execution report object
     const execReport = {
-      orderID,
-      execType,
-      ordStatus,
+      orderID: getTag(message, 37),
+      execType: getTag(message, 150),
+      ordStatus: getTag(message, 39),
       symbol,
       side: side === '1' ? 'BUY' : 'SELL',
-      orderQty: parseFloat(orderQty),
-      price: parseFloat(price),
-      transactTime: new Date(transactTime),
+      orderQty: parseFloat(getTag(message, 38)),
+      price: parseFloat(getTag(message, 44)),
+      transactTime: (() => {
+        const value = getTag(message, 60);
+        return value ? new Date(value) : new Date();
+      })(),
       receivedAt: new Date()
     };
 
     logMessage(`Received execution report: ${JSON.stringify(execReport)}`);
-
-    // Update order status in database (would be implemented elsewhere)
-    // orderService.updateOrderStatus(orderID, execReport);
   } catch (error) {
     logError('Error processing execution report:', error);
   }
 };
 
-/**
- * Subscribe to market data via FIX
- */
-const subscribeToMarketData = (symbol) => {
+const sendFixMessage = (message, description) => {
+  if (!quickfix || !fixClient || !isConnected) {
+    logError(`Cannot send ${description}: FIX session not established`);
+    return false;
+  }
+
   try {
-    if (!isConnected || !fixSession) {
-      logError('Cannot subscribe to market data: FIX session not established');
-      return false;
-    }
-
-    logMessage(`Subscribing to market data for ${symbol}...`);
-
-    // Create market data request message
-    const message = new QuickFIX.Message();
-    message.getHeader().setField(35, FIX_MSG_TYPES.MARKET_DATA_REQUEST); // MsgType
-
-    // Set message fields
-    message.setField(262, Date.now().toString()); // MDReqID (unique request ID)
-    message.setField(263, '1'); // SubscriptionRequestType (1=Subscribe)
-    message.setField(264, '1'); // MarketDepth (1=Top of book)
-    message.setField(265, '1'); // MDUpdateType (1=Full refresh)
-
-    // Add symbol
-    message.setField(55, symbol); // Symbol
-
-    // Request specific market data entry types
-    // 0=Bid, 1=Offer, 2=Trade, 3=Index Value, 4=Opening Price, etc.
-    const entryTypes = [0, 1, 2, 4, 7];
-    message.setField(267, entryTypes.length); // NoMDEntryTypes
-
-    entryTypes.forEach((type, index) => {
-      message.setField(269 + index, type.toString()); // MDEntryType
+    fixClient.send(message, () => {
+      logMessage(`Sent ${description}: ${JSON.stringify(message)}`);
     });
-
-    // Send the message
-    QuickFIX.Session.sendToTarget(message, fixSession);
-
-    logMessage(`Market data subscription request sent for ${symbol}`);
     return true;
   } catch (error) {
-    logError('Error subscribing to market data:', error);
+    logError(`Error sending ${description}:`, error);
     return false;
   }
 };
 
-/**
- * Send a new order via FIX
- */
+const subscribeToMarketData = (symbol) => {
+  const message = {
+    header: buildHeader(FIX_MSG_TYPES.MARKET_DATA_REQUEST),
+    tags: {
+      262: Date.now().toString(),
+      263: '1',
+      264: '1',
+      265: '1',
+      146: 1,
+      55: symbol,
+      267: 3
+    },
+    groups: [
+      {
+        index: 146,
+        delim: 55,
+        entries: [{ 55: symbol }]
+      },
+      {
+        index: 267,
+        delim: 269,
+        entries: [{ 269: '0' }, { 269: '1' }, { 269: '2' }]
+      }
+    ]
+  };
+
+  return sendFixMessage(message, `market data request for ${symbol}`);
+};
+
 const sendOrder = async (orderData) => {
-  try {
-    if (!isConnected || !fixSession) {
-      throw new Error('FIX session not established');
-    }
-
-    const { symbol, side, orderType, quantity, price, timeInForce } = orderData;
-
-    // Create new order single message
-    const message = new QuickFIX.Message();
-    message.getHeader().setField(35, FIX_MSG_TYPES.NEW_ORDER_SINGLE); // MsgType
-
-    // Set message fields
-    message.setField(11, Date.now().toString()); // ClOrdID (unique client order ID)
-    message.setField(55, symbol); // Symbol
-    message.setField(54, side === 'BUY' ? '1' : '2'); // Side (1=Buy, 2=Sell)
-    message.setField(60, new Date().toISOString()); // TransactTime
-    message.setField(38, quantity.toString()); // OrderQty
-    message.setField(40, orderType === 'MARKET' ? '1' : '2'); // OrdType (1=Market, 2=Limit)
-
-    // Add price for limit orders
-    if (orderType === 'LIMIT' && price) {
-      message.setField(44, price.toString()); // Price
-    }
-
-    // Set time in force
-    const tifMap = {
-      'DAY': '0',
-      'GTC': '1', // Good Till Cancel
-      'IOC': '3', // Immediate or Cancel
-      'FOK': '4'  // Fill or Kill
-    };
-    message.setField(59, tifMap[timeInForce] || '0'); // TimeInForce
-
-    // Send the message
-    QuickFIX.Session.sendToTarget(message, fixSession);
-
-    logMessage(`Order sent: ${JSON.stringify(orderData)}`);
-    return { success: true, orderId: message.getField(11) };
-  } catch (error) {
-    logError('Error sending order:', error);
-    throw error;
+  if (!quickfix || !fixClient || !isConnected) {
+    throw new Error('FIX session not established');
   }
+
+  const { symbol, side, orderType, quantity, price, timeInForce } = orderData;
+
+  const tifMap = {
+    DAY: '0',
+    GTC: '1',
+    IOC: '3',
+    FOK: '4'
+  };
+
+  const message = {
+    header: buildHeader(FIX_MSG_TYPES.NEW_ORDER_SINGLE),
+    tags: {
+      11: Date.now().toString(36),
+      55: symbol,
+      54: side === 'BUY' ? '1' : '2',
+      38: quantity.toString(),
+      40: orderType === 'MARKET' ? '1' : '2',
+      59: tifMap[timeInForce] || '0',
+      60: formatFixTimestamp(new Date())
+    }
+  };
+
+  if (orderType === 'LIMIT' && price) {
+    message.tags[44] = price.toString();
+  }
+
+  if (!sendFixMessage(message, `order for ${symbol}`)) {
+    throw new Error('Failed to dispatch FIX order');
+  }
+
+  return { success: true, orderId: message.tags[11] };
 };
 
 /**
