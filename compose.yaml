@@ -1,0 +1,6 @@
+services:
+  pricepredictionv3:
+    image: pricepredictionv3
+    build:
+      context: .
+      dockerfile: ./Dockerfile
