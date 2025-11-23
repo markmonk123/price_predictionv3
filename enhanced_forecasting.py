@@ -131,6 +131,10 @@ class EnhancedBitcoinForecaster:
         feature_cols = [col for col in df.columns if not col.startswith('target_') and col not in ['date', 'price']]
         target_cols = [f'target_{step}' for step in range(1, forecast_horizon + 1)]
         
+        # Replace infinite values with 0 before dropping NaN
+        for col in feature_cols:
+            df[col] = df[col].replace([np.inf, -np.inf], 0)
+        
         # Drop rows with NaN in features or targets
         valid_rows = df[feature_cols + target_cols].dropna()
         
@@ -152,7 +156,10 @@ class EnhancedBitcoinForecaster:
         
         X = prepared_df[feature_cols]
         # For now, train on 1-step ahead target, but we'll use recursive prediction
-        y = prepared_df['target_1'] 
+        y = prepared_df['target_1']
+        
+        # Ensure all features are finite numerical values
+        X = X.fillna(0).replace([np.inf, -np.inf], 0)
         
         # Train-test split
         X_train, X_test, y_train, y_test = train_test_split(
