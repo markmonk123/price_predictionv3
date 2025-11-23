@@ -11,8 +11,6 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, E
 from sklearn.ensemble import VotingRegressor
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
 from datetime import datetime, timedelta
 import warnings
 import time
@@ -49,12 +47,34 @@ class EnhancedBitcoinForecaster:
                 n_estimators=180, max_depth=14, min_samples_split=4,
                 random_state=42, n_jobs=-1
             ),
-            'Pipeline_RF': Pipeline([
-                ('scaler', StandardScaler()),
-                ('rf', RandomForestRegressor(n_estimators=100, random_state=42))
-            ])
+            'RandomForest_3': RandomForestRegressor(
+                n_estimators=100, random_state=42
+            )
         }
-    
+
+    def _drop_normalized_columns(self, df):
+        """Remove columns that appear to be normalized or scaled."""
+        if df is None:
+            return df
+
+        drop_cols = []
+        for col in df.columns:
+            if col in {"date", "price"}:
+                continue
+            lower = col.lower()
+            if "norm" in lower or "scale" in lower:
+                drop_cols.append(col)
+                continue
+            series = df[col].dropna()
+            if not series.empty and series.between(0, 1).all():
+                drop_cols.append(col)
+
+        if drop_cols:
+            print(f"   ⚠️ Dropping normalized columns: {drop_cols}")
+            df = df.drop(columns=drop_cols)
+
+        return df
+
     def create_prediction_features(self, df):
         """Create features specifically designed for multi-step ahead prediction."""
         df = df.copy()
@@ -119,7 +139,10 @@ class EnhancedBitcoinForecaster:
     def train_models(self, df):
         """Train all models on the provided data."""
         print("🤖 Training enhanced forecasting models...")
-        
+
+        # Remove any unexpected normalized fields
+        df = self._drop_normalized_columns(df)
+
         # Prepare data for multi-step prediction
         prepared_df, feature_cols, target_cols = self.prepare_multistep_data(df)
         
@@ -208,6 +231,7 @@ class EnhancedBitcoinForecaster:
         print("🔮 Generating 12-hour forecast...")
         
         # Prepare the latest data
+        latest_data = self._drop_normalized_columns(latest_data)
         df_prep, feature_cols, _ = self.prepare_multistep_data(latest_data)
         
         if len(df_prep) == 0:
