@@ -57,7 +57,7 @@ def create_enhanced_features(df, pct_threshold=0.002):
     for window in [30, 60, 120, 360, intervals_in_day * 7]: # 30m, 1h, 2h, 6h, 1w
         df[f'sma_{window}'] = df['price'].rolling(window=window).mean()
         df[f'ema_{window}'] = df['price'].ewm(span=window).mean()
-        df[f'price_sma_ratio_{window}'] = df['price'] / df[f'sma_{window}']
+        df[f'price_sma_ratio_{window}'] = df['price'] / (df[f'sma_{window}'] + 1e-8)
         df[f'volatility_{window}'] = df['price'].rolling(window=window).std()
     
     # MACD indicators (using standard short-term periods, sensitive for 1-min data)
@@ -72,7 +72,7 @@ def create_enhanced_features(df, pct_threshold=0.002):
         delta = prices.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-        rs = gain / loss
+        rs = gain / (loss + 1e-8)
         return 100 - (100 / (1 + rs))
     
     df['rsi_14'] = calculate_rsi(df['price'], 14)
@@ -85,12 +85,13 @@ def create_enhanced_features(df, pct_threshold=0.002):
     bb_std_dev = df['price'].rolling(window=bb_period).std()
     df['bb_upper'] = bb_ma + (bb_std_dev * bb_std)
     df['bb_lower'] = bb_ma - (bb_std_dev * bb_std)
-    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / bb_ma
-    df['bb_position'] = (df['price'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / (bb_ma + 1e-8)
+    bb_range = df['bb_upper'] - df['bb_lower']
+    df['bb_position'] = (df['price'] - df['bb_lower']) / (bb_range + 1e-8)
     
     # Price momentum and slopes (scaled for 1-min)
     for period in [30, 60, 120]: # 30m, 1h, 2h
-        df[f'momentum_{period}'] = (df['price'] / df['price'].shift(period) - 1) * 100
+        df[f'momentum_{period}'] = (df['price'] / (df['price'].shift(period) + 1e-8) - 1) * 100
         
         # Linear regression slope
         def calc_slope(window, period=period):
@@ -112,7 +113,8 @@ def create_enhanced_features(df, pct_threshold=0.002):
     for window in [60, 120, 240]: # 1h, 2h, 4h
         df[f'resistance_{window}'] = df['price'].rolling(window=window).max()
         df[f'support_{window}'] = df['price'].rolling(window=window).min()
-        df[f'price_position_{window}'] = (df['price'] - df[f'support_{window}']) / (df[f'resistance_{window}'] - df[f'support_{window}'])
+        price_range = df[f'resistance_{window}'] - df[f'support_{window}']
+        df[f'price_position_{window}'] = (df['price'] - df[f'support_{window}']) / (price_range + 1e-8)
     
     # Trend indicators (scaled for 1-min)
     df['price_trend_30'] = np.where(df['price'] > df['sma_30'], 1, 0)
@@ -121,10 +123,13 @@ def create_enhanced_features(df, pct_threshold=0.002):
     
     # Classification target
     df['future_price'] = df['price'].shift(-1)
-    df['next_return'] = (df['future_price'] - df['price']) / df['price']
+    df['next_return'] = (df['future_price'] - df['price']) / (df['price'] + 1e-8)
     df['target'] = 0
     df.loc[df['next_return'] >= pct_threshold, 'target'] = 1
     df.loc[df['next_return'] <= -pct_threshold, 'target'] = -1
+    
+    # Replace inf and nan values
+    df = df.replace([np.inf, -np.inf], np.nan)
     
     return df.dropna()
 
