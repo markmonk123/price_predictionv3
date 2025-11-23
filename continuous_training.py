@@ -196,11 +196,11 @@ class ContinuousTrainingSystem:
 
                     logger.info(f"🔄 {model_id}: Retraining with {len(new_data)} data points")
 
-                    # Resample to 30-minute intervals for training
+                    # Resample to 5-minute intervals for training
                     train_data = new_data.copy()
                     train_data['date'] = pd.to_datetime(train_data['date'])
                     train_data = (
-                        train_data.resample('30T', on='date').last().dropna().reset_index()
+                        train_data.resample('5T', on='date').last().dropna().reset_index()
                     )
 
                     # Retrain models

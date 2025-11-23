@@ -22,7 +22,7 @@ def run_enhanced_demo():
         
         print("📊 Running enhanced prediction system...")
         print("⏰ This will demonstrate:")
-        print("   • 12-hour price predictions (30-min intervals)")
+        print("   • 12-hour price predictions (5-min intervals)")
         print("   • Market sentiment analysis (6-hour window)")
         print("   • Statistical analysis (high/low/median/average)")
         print("   • Multi-model training (5 models)")
@@ -36,7 +36,7 @@ def run_enhanced_demo():
         print("\n✅ Demo completed successfully!")
         print("\n📋 Summary of Features Demonstrated:")
         print("   ✅ Fixed data handling issues")
-        print("   ✅ 12-hour forecasting with 24 predictions")
+        print("   ✅ 12-hour forecasting with 144 predictions")
         print("   ✅ Market sentiment analysis (BULLISH/BEARISH/NEUTRAL)")
         print("   ✅ Statistical analysis with delta values")
         print("   ✅ Multi-model ensemble (5 models)")
