@@ -11,6 +11,7 @@ Provides secure model serving with:
 
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 
@@ -19,7 +20,7 @@ import joblib
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -39,11 +40,40 @@ MAX_BATCH_SIZE = int(os.getenv('MAX_BATCH_SIZE', '100'))
 MAX_REQUEST_SIZE = int(os.getenv('MAX_REQUEST_SIZE', '10485760'))  # 10MB default
 CORS_ORIGINS = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:3001').split(',')
 
-# Initialize FastAPI app
+# Global model storage
+LOADED_MODELS: Dict[str, Any] = {}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    # Startup
+    global LOADED_MODELS
+    logger.info("Starting up Model Server...")
+    logger.info(f"Models directory: {MODELS_DIR.absolute()}")
+    logger.info(f"CORS origins: {CORS_ORIGINS}")
+    logger.info(f"Max features: {MAX_FEATURES}")
+    logger.info(f"Max batch size: {MAX_BATCH_SIZE}")
+    
+    LOADED_MODELS = load_available_models()
+    
+    if not LOADED_MODELS:
+        logger.warning("No models loaded! Predictions will fail.")
+    else:
+        logger.info(f"Successfully loaded models: {list(LOADED_MODELS.keys())}")
+    
+    yield
+    
+    # Shutdown (cleanup if needed)
+    logger.info("Shutting down Model Server...")
+
+
+# Initialize FastAPI app with lifespan
 app = FastAPI(
     title="Price Prediction Model Server",
     description="Secure model serving endpoint for imbalanced-learn ensemble models",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Configure CORS
@@ -54,9 +84,6 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
-
-# Global model storage
-LOADED_MODELS: Dict[str, Any] = {}
 
 
 class PredictionInput(BaseModel):
@@ -75,7 +102,8 @@ class PredictionInput(BaseModel):
         description="Model name to use for prediction"
     )
     
-    @validator('features')
+    @field_validator('features')
+    @classmethod
     def validate_features(cls, v):
         """Validate feature dimensions and types."""
         if not v:
@@ -115,7 +143,8 @@ class PredictionInput(BaseModel):
         
         return v
     
-    @validator('model_name')
+    @field_validator('model_name')
+    @classmethod
     def validate_model_name(cls, v):
         """Validate model name to prevent path traversal."""
         if v and ('/' in v or '\\' in v or '..' in v):
@@ -223,23 +252,6 @@ def load_available_models() -> Dict[str, Any]:
     logger.info(f"Loaded {len(models)} models: {list(models.keys())}")
     return models
 
-
-@app.on_event("startup")
-async def startup_event():
-    """Load models on application startup."""
-    global LOADED_MODELS
-    logger.info("Starting up Model Server...")
-    logger.info(f"Models directory: {MODELS_DIR.absolute()}")
-    logger.info(f"CORS origins: {CORS_ORIGINS}")
-    logger.info(f"Max features: {MAX_FEATURES}")
-    logger.info(f"Max batch size: {MAX_BATCH_SIZE}")
-    
-    LOADED_MODELS = load_available_models()
-    
-    if not LOADED_MODELS:
-        logger.warning("No models loaded! Predictions will fail.")
-    else:
-        logger.info(f"Successfully loaded models: {list(LOADED_MODELS.keys())}")
 
 
 @app.get("/health", response_model=HealthResponse)

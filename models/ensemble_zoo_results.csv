@@ -1,0 +1,4 @@
+ensemble_name,best_scaler,best_score,model_path
+ensemble_balanced_stacking,quantile,0.8779501853429398,models/ensemble_balanced_stacking.joblib
+ensemble_voting,quantile,0.8753549969289782,models/ensemble_voting.joblib
+ensemble_hybrid,quantile,0.8439259324703148,models/ensemble_hybrid.joblib

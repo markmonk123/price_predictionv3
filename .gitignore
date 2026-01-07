@@ -77,3 +77,6 @@ htmlcov/
 # Data files (optional - uncomment if needed)
 # data/*.csv
 # data/*.parquet
+
+# Test files
+test_data.csv
