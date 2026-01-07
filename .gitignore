@@ -1,6 +1,9 @@
 # Model files - exclude trained models from version control
 models/*.joblib
 
+# Test data
+synthetic_test_data.csv
+
 # Environment variables and secrets
 .env
 

@@ -149,7 +149,7 @@ class PredictionRequest(BaseModel):
         return v
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "model_name": "ensemble_balanced_stacking",
                 "features": [[1.0, 2.0, 3.0, 4.0, 5.0]]

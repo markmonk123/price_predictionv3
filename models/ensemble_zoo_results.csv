@@ -1,0 +1,4 @@
+ensemble_name,best_scaler,best_score,model_path
+balanced_stacking,standard,0.9622995629859844,models/ensemble_balanced_stacking.joblib
+balanced_voting,standard,0.9504937067600233,models/ensemble_voting.joblib
+hybrid_zoo,standard,0.9309961776158325,models/ensemble_hybrid.joblib
