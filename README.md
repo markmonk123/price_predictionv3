@@ -20,6 +20,10 @@ A comprehensive machine learning system for cryptocurrency price prediction feat
 ```
 price_predictionv3/
 ├── src/
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── fetch_crypto_data.py    # Real historical data fetcher
+│   │   └── generate_crypto_data.py # Realistic data generator
 │   ├── models/
 │   │   ├── __init__.py
 │   │   ├── utils.py              # Data preprocessing utilities
@@ -83,11 +87,32 @@ cp .env.example .env
 # DO NOT commit .env file with real credentials!
 ```
 
-### 4. Train Ensemble Models
+### 4. Prepare Historical Data
+
+**Option A: Generate Realistic Crypto Data (Recommended for Demo)**
+```bash
+# Generate 365 days of realistic Bitcoin-like price data
+python -m src.data.generate_crypto_data --days 365 --price 45000 --output crypto_historical_data.csv
+
+# This creates a CSV with:
+# - 23 engineered features (OHLCV, moving averages, RSI, MACD, Bollinger Bands, etc.)
+# - Binary target (next-day price increase prediction)
+# - ~335 samples after feature engineering
+```
+
+**Option B: Fetch Real Historical Data (Requires Internet)**
+```bash
+# Fetch real data from Yahoo Finance
+python -m src.data.fetch_crypto_data --symbol BTC-USD --days 365 --output crypto_historical_data.csv
+
+# Note: Requires network access and yfinance package
+```
+
+### 5. Train Ensemble Models
 
 ```bash
-# Create a sample dataset or use your own CSV with a 'target' column
-python -m src.models.ensemble_zoo --input data.csv --target target --output-dir models
+# Train models using the historical crypto data
+python -m src.models.ensemble_zoo --input crypto_historical_data.csv --target target --output-dir models
 
 # This will create:
 # - models/ensemble_balanced_stacking.joblib
@@ -96,7 +121,7 @@ python -m src.models.ensemble_zoo --input data.csv --target target --output-dir 
 # - models/ensemble_zoo_results.csv
 ```
 
-### 5. Start FastAPI Server
+### 6. Start FastAPI Server
 
 ```bash
 # Start the model serving API
@@ -111,7 +136,7 @@ python src/api/fastapi_server.py
 # - http://localhost:8000/predict (Prediction endpoint)
 ```
 
-### 6. Start Node.js Backend
+### 7. Start Node.js Backend
 
 ```bash
 cd services/node-backend
@@ -125,7 +150,7 @@ npm start
 # Backend will be available at http://localhost:3001
 ```
 
-### 7. Start React Frontend
+### 8. Start React Frontend
 
 ```bash
 cd services/react-frontend
@@ -140,6 +165,38 @@ npm start
 ```
 
 ## 📊 Model Training Details
+
+### Historical Data Features
+
+The system generates/fetches cryptocurrency historical data with comprehensive feature engineering:
+
+**Price Features (OHLCV)**
+- Open, High, Low, Close prices
+- Trading volume
+
+**Return Features**
+- 1-day, 7-day, and 30-day returns
+
+**Moving Averages**
+- 7-day and 30-day moving averages
+- MA ratio (7-day / 30-day)
+
+**Volatility Indicators**
+- 7-day and 30-day rolling volatility
+
+**Technical Indicators**
+- RSI (Relative Strength Index)
+- MACD (Moving Average Convergence Divergence)
+- Bollinger Bands (upper, lower, width)
+
+**Price Patterns**
+- High/Low ratio
+- Close/Open ratio
+- Volume ratios
+
+**Target Variable**
+- Binary classification: 1 = next-day price increase, 0 = decrease/flat
+- Creates naturally imbalanced dataset suitable for ensemble strategies
 
 ### Ensemble Strategies
 
@@ -254,10 +311,37 @@ curl -X POST http://localhost:3001/forward-tick \
   }'
 ```
 
-### Synthetic Data Testing
+### Historical Data Generation
+
+```bash
+# Generate realistic cryptocurrency data with proper OHLCV patterns
+python -m src.data.generate_crypto_data --days 365 --price 45000 --output crypto_historical_data.csv
+
+# The generator creates:
+# - Realistic price movements using geometric Brownian motion
+# - Proper OHLC relationships
+# - Log-normal volume distribution
+# - 23 technical features
+# - Binary classification target
+
+# Inspect the generated data
+python << 'EOF'
+import pandas as pd
+df = pd.read_csv('crypto_historical_data.csv', index_col=0, parse_dates=True)
+print(f"Shape: {df.shape}")
+print(f"Date range: {df.index[0]} to {df.index[-1]}")
+print(f"Price range: ${df['close'].min():.2f} to ${df['close'].max():.2f}")
+print(f"\nTarget distribution:\n{df['target'].value_counts()}")
+EOF
+
+# Train models on this data
+python -m src.models.ensemble_zoo --input crypto_historical_data.csv --target target
+```
+
+### Alternative: Legacy Synthetic Data
 
 ```python
-# Create synthetic dataset for testing
+# For comparison, you can also create simple synthetic imbalanced data
 import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification

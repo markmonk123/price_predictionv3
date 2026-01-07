@@ -11,6 +11,9 @@ fastapi>=0.90,<1.0
 uvicorn>=0.18,<1.0
 pydantic>=1.10,<3.0
 
+# Data fetching
+yfinance>=0.2.0,<0.3.0
+
 # Optional dependencies (uncomment if needed)
 # xgboost>=1.5,<2.0  # For gradient boosting
 # numba>=0.55,<0.58  # For JIT compilation and performance optimization

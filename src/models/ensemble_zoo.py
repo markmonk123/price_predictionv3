@@ -310,7 +310,7 @@ def main():
     try:
         # Load data
         logger.info(f"Loading data from: {args.input}")
-        df = pd.read_csv(args.input)
+        df = pd.read_csv(args.input, index_col=0, parse_dates=True)
         logger.info(f"Data loaded: {df.shape}")
         
         # Check target column

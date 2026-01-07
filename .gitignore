@@ -1,8 +1,9 @@
 # Model files - exclude trained models from version control
 models/*.joblib
 
-# Test data
+# Test data and historical data files
 synthetic_test_data.csv
+crypto_historical_data.csv
 
 # Environment variables and secrets
 .env
