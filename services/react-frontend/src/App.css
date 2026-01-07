@@ -1,0 +1,316 @@
+/* App.css - Minimal styling for Price Prediction UI */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  min-height: 100vh;
+}
+
+.App {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.App-header {
+  background-color: rgba(255, 255, 255, 0.95);
+  padding: 2rem;
+  text-align: center;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+}
+
+.App-header h1 {
+  color: #333;
+  margin-bottom: 0.5rem;
+  font-size: 2.5rem;
+}
+
+.App-header p {
+  color: #666;
+  font-size: 1.1rem;
+}
+
+.App-main {
+  flex: 1;
+  padding: 2rem;
+  max-width: 1200px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+section {
+  background: white;
+  border-radius: 12px;
+  padding: 2rem;
+  margin-bottom: 2rem;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+h2 {
+  color: #333;
+  margin-bottom: 1.5rem;
+  font-size: 1.8rem;
+}
+
+h3 {
+  color: #555;
+  margin-bottom: 1rem;
+  font-size: 1.3rem;
+}
+
+/* Status Cards */
+.status-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1.5rem;
+}
+
+.status-card {
+  padding: 1.5rem;
+  border-radius: 8px;
+  border: 2px solid #e0e0e0;
+  transition: transform 0.2s;
+}
+
+.status-card:hover {
+  transform: translateY(-2px);
+}
+
+.status-card.healthy {
+  border-color: #4caf50;
+  background-color: #f1f8f4;
+}
+
+.status-card.unhealthy {
+  border-color: #f44336;
+  background-color: #fef5f5;
+}
+
+.status-card p {
+  margin: 0.5rem 0;
+  color: #666;
+}
+
+.models-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.model-badge {
+  background-color: #667eea;
+  color: white;
+  padding: 0.3rem 0.8rem;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+/* Input Section */
+.input-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.input-field {
+  display: flex;
+  flex-direction: column;
+}
+
+.input-field label {
+  color: #555;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  font-size: 0.95rem;
+}
+
+.input-field input {
+  padding: 0.8rem;
+  border: 2px solid #e0e0e0;
+  border-radius: 6px;
+  font-size: 1rem;
+  transition: border-color 0.2s;
+}
+
+.input-field input:focus {
+  outline: none;
+  border-color: #667eea;
+}
+
+.predict-button {
+  width: 100%;
+  padding: 1rem 2rem;
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: white;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.predict-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.predict-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Results Section */
+.results-section {
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.result-card {
+  background-color: #f8f9fa;
+  padding: 1.5rem;
+  border-radius: 8px;
+  margin-bottom: 1.5rem;
+  border-left: 4px solid #667eea;
+}
+
+.prediction-value {
+  font-size: 2rem;
+  font-weight: bold;
+  color: #667eea;
+  margin: 1rem 0;
+}
+
+.probabilities {
+  margin-top: 1.5rem;
+}
+
+.probability-bar {
+  margin: 1rem 0;
+}
+
+.probability-bar > span {
+  display: inline-block;
+  width: 80px;
+  font-weight: 600;
+  color: #555;
+}
+
+.bar-container {
+  display: inline-block;
+  width: calc(100% - 80px);
+  height: 30px;
+  background-color: #e0e0e0;
+  border-radius: 15px;
+  position: relative;
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+  border-radius: 15px;
+  transition: width 0.3s ease;
+}
+
+.bar-label {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-weight: 600;
+  color: #333;
+  font-size: 0.9rem;
+}
+
+pre {
+  background-color: #f4f4f4;
+  padding: 1rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 0.9rem;
+  color: #333;
+}
+
+/* Error Section */
+.error-section {
+  background-color: #fef5f5;
+  border: 2px solid #f44336;
+  animation: fadeIn 0.3s ease-in;
+}
+
+.error-section h3 {
+  color: #d32f2f;
+}
+
+.error-section p {
+  color: #c62828;
+  font-weight: 500;
+}
+
+/* Footer */
+.App-footer {
+  background-color: rgba(255, 255, 255, 0.95);
+  padding: 1.5rem;
+  text-align: center;
+  color: #666;
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.1);
+}
+
+.App-footer p {
+  margin: 0.3rem 0;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .App-header h1 {
+    font-size: 1.8rem;
+  }
+
+  .App-header p {
+    font-size: 1rem;
+  }
+
+  .App-main {
+    padding: 1rem;
+  }
+
+  section {
+    padding: 1.5rem;
+  }
+
+  h2 {
+    font-size: 1.5rem;
+  }
+
+  .input-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .status-cards {
+    grid-template-columns: 1fr;
+  }
+}
