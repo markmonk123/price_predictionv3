@@ -211,10 +211,10 @@ def create_hybrid_ensemble(
     n_jobs: int = DEFAULT_N_JOBS
 ) -> ImbPipeline:
     """
-    Create a hybrid ensemble combining EasyEnsemble with Gradient Boosting.
+    Create a hybrid ensemble using EasyEnsembleClassifier.
     
-    EasyEnsembleClassifier handles imbalance through bagging with undersampling,
-    using Gradient Boosting as base estimator for strong performance.
+    EasyEnsembleClassifier handles imbalance through bagging with undersampling.
+    It creates an ensemble of AdaBoost classifiers trained on balanced subsets.
     
     Args:
         scaler: Fitted or unfitted scaler instance
@@ -226,14 +226,8 @@ def create_hybrid_ensemble(
     """
     logger.info("Creating Hybrid Ensemble (EasyEnsemble + GB)")
     
-    # Base estimator for EasyEnsemble
-    base_estimator = GradientBoostingClassifier(
-        n_estimators=50,
-        max_depth=4,
-        random_state=random_state
-    )
-    
-    # EasyEnsemble with GB base
+    # Note: EasyEnsembleClassifier doesn't accept a custom base_estimator parameter
+    # It uses AdaBoostClassifier internally by default
     easy_ensemble = EasyEnsembleClassifier(
         n_estimators=10,
         random_state=random_state,

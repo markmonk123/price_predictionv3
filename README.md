@@ -7,7 +7,7 @@ ML-powered price prediction system with imbalanced-learn ensembles, FastAPI mode
 - **Ensemble Zoo**: Three production-ready ensemble models
   - Balanced Stacking Ensemble (SMOTE + Stacking)
   - Balanced Voting Ensemble (SMOTEENN + Voting)
-  - Hybrid Ensemble (EasyEnsemble + Gradient Boosting)
+  - Hybrid Ensemble (EasyEnsemble with AdaBoost)
 - **Automated Scaler Evaluation**: Top-5 scaler ranking with cross-validation
 - **FastAPI Model Server**: Secure REST API for predictions with Pydantic validation
 - **Node.js Backend**: Coinbase SDK integration and FIX protocol support
@@ -252,8 +252,8 @@ REACT_APP_BACKEND_URL=http://localhost:3001
    - Sampling: SMOTEENN (combined over/under sampling)
    - Voting: Soft voting
 
-3. **Hybrid (EasyEnsemble + GB)**
-   - EasyEnsembleClassifier with Gradient Boosting base
+3. **Hybrid (EasyEnsemble)**
+   - EasyEnsembleClassifier with AdaBoost base estimators
    - Handles imbalance through bagging + undersampling
 
 ### Scaler Evaluation
