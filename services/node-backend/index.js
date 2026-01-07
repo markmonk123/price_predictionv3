@@ -57,9 +57,10 @@ function initializeCoinbase() {
   try {
     // TODO: Initialize Coinbase SDK client
     // This is a placeholder - actual SDK usage depends on SDK version
+    // Refer to @coinbase/coinbase-sdk documentation for correct initialization
     coinbaseClient = Coinbase.configureFromJson({
       apiKey: COINBASE_API_KEY,
-      privateKey: COINBASE_API_SECRET
+      apiSecret: COINBASE_API_SECRET
     });
     
     console.log('✓ Coinbase SDK initialized');

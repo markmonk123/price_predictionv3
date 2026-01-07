@@ -38,6 +38,7 @@ from sklearn.ensemble import (
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, cross_validate
 from sklearn.metrics import roc_auc_score, f1_score, accuracy_score
+from sklearn.preprocessing import StandardScaler
 from imblearn.ensemble import (
     BalancedRandomForestClassifier,
     EasyEnsembleClassifier
@@ -159,9 +160,8 @@ class EnsembleZoo:
         """
         logger.info("Building Balanced Stacking Ensemble...")
         
-        # Get best scaler from candidates
-        from sklearn.preprocessing import StandardScaler
-        scaler = StandardScaler()  # Default, will be replaced if best_scaler selected
+        # Use StandardScaler as default scaler
+        scaler = StandardScaler()
         
         # Base estimators for stacking
         base_estimators = [
@@ -213,7 +213,6 @@ class EnsembleZoo:
         """
         logger.info("Building Balanced Voting Ensemble...")
         
-        from sklearn.preprocessing import StandardScaler
         scaler = StandardScaler()
         
         # Estimators for voting
@@ -263,7 +262,6 @@ class EnsembleZoo:
         """
         logger.info("Building Hybrid Ensemble (EasyEnsemble + GB)...")
         
-        from sklearn.preprocessing import StandardScaler
         scaler = StandardScaler()
         
         # EasyEnsemble with gradient boosting base estimator
