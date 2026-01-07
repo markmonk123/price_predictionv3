@@ -1,1 +1,21 @@
-# To ensure app dependencies are ported from your virtual environment/host machine into your container, run 'pip freeze > requirements.txt' in the terminal to overwrite this file
+# Conservative dependency constraints for maximum compatibility
+# Core scientific computing
+numpy>=1.21,<1.25
+scipy>=1.7,<1.11
+pandas>=1.3,<2.2
+
+# Machine learning
+scikit-learn>=1.0,<1.3
+imbalanced-learn>=0.9,<0.13
+xgboost>=1.6,<2.0
+
+# Utilities
+joblib>=1.1,<2.2
+
+# Web framework for model serving
+fastapi>=0.90,<1.0
+uvicorn>=0.18,<1.0
+pydantic>=1.8,<2.0
+
+# Optional for testing
+pytest>=7.0,<8.0
