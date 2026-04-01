@@ -1,0 +1,20 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.pythonProjects": [],
+    "chat.agentSessionsViewLocation": "view",
+    "chat.edits2.enabled": true,
+    "chat.mcp.access": "registry",
+    "chat.mcp.assisted.nuget.enabled": true,
+    "chat.mcp.autostart": "onlyNew",
+    "chat.mcp.discovery.enabled": {
+        "claude-desktop": true
+    },
+    "chat.mcp.serverSampling": {
+
+    },
+    "python.testing.pytestArgs": [
+        "python"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true
+}

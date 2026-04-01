@@ -45,11 +45,12 @@ def create_features(df, pct_threshold=0.01):
         df[f'median_{window}'] = df['price'].rolling(window=window).median()
         
         # Price position within range
-        df[f'price_position_{window}'] = (df['price'] - df[f'min_{window}']) / (df[f'max_{window}'] - df[f'min_{window}'])
+        price_range = df[f'max_{window}'] - df[f'min_{window}']
+        df[f'price_position_{window}'] = (df['price'] - df[f'min_{window}']) / (price_range + 1e-8)
         
         # Price relative to moving averages
-        df[f'price_to_sma_{window}'] = df['price'] / df[f'sma_{window}']
-        df[f'price_to_ema_{window}'] = df['price'] / df[f'ema_{window}']
+        df[f'price_to_sma_{window}'] = df['price'] / (df[f'sma_{window}'] + 1e-8)
+        df[f'price_to_ema_{window}'] = df['price'] / (df[f'ema_{window}'] + 1e-8)
     
     # Volatility features
     for window in [5, 10, 20, 30]:
@@ -74,7 +75,7 @@ def create_features(df, pct_threshold=0.01):
         delta = prices.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-        rs = gain / loss
+        rs = gain / (loss + 1e-8)
         rsi = 100 - (100 / (1 + rs))
         return rsi
     
@@ -91,8 +92,9 @@ def create_features(df, pct_threshold=0.01):
             
             df[f'bb_upper_{period}_{std_dev}'] = bb_ma + (bb_std * std_dev)
             df[f'bb_lower_{period}_{std_dev}'] = bb_ma - (bb_std * std_dev)
-            df[f'bb_width_{period}_{std_dev}'] = (df[f'bb_upper_{period}_{std_dev}'] - df[f'bb_lower_{period}_{std_dev}']) / bb_ma
-            df[f'bb_position_{period}_{std_dev}'] = (df['price'] - df[f'bb_lower_{period}_{std_dev}']) / (df[f'bb_upper_{period}_{std_dev}'] - df[f'bb_lower_{period}_{std_dev}'])
+            df[f'bb_width_{period}_{std_dev}'] = (df[f'bb_upper_{period}_{std_dev}'] - df[f'bb_lower_{period}_{std_dev}']) / (bb_ma + 1e-8)
+            bb_range = df[f'bb_upper_{period}_{std_dev}'] - df[f'bb_lower_{period}_{std_dev}']
+            df[f'bb_position_{period}_{std_dev}'] = (df['price'] - df[f'bb_lower_{period}_{std_dev}']) / (bb_range + 1e-8)
     
     # Linear Regression Slope (momentum indicators)
     def calc_slope(window):
@@ -115,8 +117,8 @@ def create_features(df, pct_threshold=0.01):
     
     # Momentum indicators
     for period in [3, 7, 14, 21, 30]:
-        df[f'momentum_{period}'] = (df['price'] / df['price'].shift(period) - 1) * 100
-        df[f'roc_{period}'] = ((df['price'] - df['price'].shift(period)) / df['price'].shift(period)) * 100
+        df[f'momentum_{period}'] = (df['price'] / (df['price'].shift(period) + 1e-8) - 1) * 100
+        df[f'roc_{period}'] = ((df['price'] - df['price'].shift(period)) / (df['price'].shift(period) + 1e-8)) * 100
     
     # Price acceleration (use periods that exist in momentum)
     for period in [7, 14, 21]:
@@ -126,14 +128,16 @@ def create_features(df, pct_threshold=0.01):
     for period in [14, 21]:
         lowest_low = df['price'].rolling(window=period).min()
         highest_high = df['price'].rolling(window=period).max()
-        df[f'stoch_k_{period}'] = 100 * (df['price'] - lowest_low) / (highest_high - lowest_low)
+        stoch_range = highest_high - lowest_low
+        df[f'stoch_k_{period}'] = 100 * (df['price'] - lowest_low) / (stoch_range + 1e-8)
         df[f'stoch_d_{period}'] = df[f'stoch_k_{period}'].rolling(window=3).mean()
     
     # Williams %R
     for period in [14, 21]:
         highest_high = df['price'].rolling(window=period).max()
         lowest_low = df['price'].rolling(window=period).min()
-        df[f'williams_r_{period}'] = -100 * (highest_high - df['price']) / (highest_high - lowest_low)
+        williams_range = highest_high - lowest_low
+        df[f'williams_r_{period}'] = -100 * (highest_high - df['price']) / (williams_range + 1e-8)
     
     # Detrended Price Oscillator (DPO)
     for period in [10, 20, 30]:
@@ -150,7 +154,8 @@ def create_features(df, pct_threshold=0.01):
     for window in [10, 20, 50]:
         df[f'resistance_{window}'] = df['price'].rolling(window=window).max()
         df[f'support_{window}'] = df['price'].rolling(window=window).min()
-        df[f'channel_position_{window}'] = (df['price'] - df[f'support_{window}']) / (df[f'resistance_{window}'] - df[f'support_{window}'])
+        channel_range = df[f'resistance_{window}'] - df[f'support_{window}']
+        df[f'channel_position_{window}'] = (df['price'] - df[f'support_{window}']) / (channel_range + 1e-8)
     
     # Trend strength indicators
     for window in [10, 20, 50]:
@@ -161,7 +166,7 @@ def create_features(df, pct_threshold=0.01):
     df['volume_proxy'] = df['price'].rolling(window=20).std()
     df['price_volume_trend'] = df['price'] * df['volume_proxy']
     df['volume_sma'] = df['volume_proxy'].rolling(window=20).mean()
-    df['volume_ratio'] = df['volume_proxy'] / df['volume_sma']
+    df['volume_ratio'] = df['volume_proxy'] / (df['volume_sma'] + 1e-8)
     
     # Fractal indicators
     def is_fractal_high(series, period=5):
@@ -185,8 +190,8 @@ def create_features(df, pct_threshold=0.01):
             if feature == 'transaction_count':
                 df['tx_count_ma_7'] = df[feature].rolling(window=7).mean()
                 df['tx_count_ma_30'] = df[feature].rolling(window=30).mean()
-                df['tx_count_trend'] = (df['tx_count_ma_7'] / df['tx_count_ma_30'] - 1) * 100
-                df['tx_count_zscore'] = (df[feature] - df['tx_count_ma_30']) / df[feature].rolling(window=30).std()
+                df['tx_count_trend'] = (df['tx_count_ma_7'] / (df['tx_count_ma_30'] + 1e-8) - 1) * 100
+                df['tx_count_zscore'] = (df[feature] - df['tx_count_ma_30']) / (df[feature].rolling(window=30).std() + 1e-8)
                 
             # Mempool stress indicators
             elif feature == 'mempool_congestion':
@@ -214,15 +219,18 @@ def create_features(df, pct_threshold=0.01):
         df['tx_price_divergence'] = (tx_returns - price_returns).abs()
         
         # Transaction efficiency relative to price
-        df['tx_per_dollar'] = df['transaction_count'] / df['price']
-        df['tx_efficiency'] = df['tx_per_dollar'] / df['tx_per_dollar'].rolling(window=30).mean()
+        df['tx_per_dollar'] = df['transaction_count'] / (df['price'] + 1e-8)
+        df['tx_efficiency'] = df['tx_per_dollar'] / (df['tx_per_dollar'].rolling(window=30).mean() + 1e-8)
     
     # Classification target: 1 if price increases >=1.0% next day, -1 if decreases <=-1.0%, 0 otherwise
     df['future_price'] = df['price'].shift(-1)
-    df['pct_change'] = (df['future_price'] - df['price']) / df['price']
+    df['pct_change'] = (df['future_price'] - df['price']) / (df['price'] + 1e-8)
     df['target'] = 0
     df.loc[df['pct_change'] >= pct_threshold, 'target'] = 1
     df.loc[df['pct_change'] <= -pct_threshold, 'target'] = -1
+    
+    # Replace inf and nan values in features
+    df = df.replace([np.inf, -np.inf], np.nan)
     
     # Keep the last row (most recent) for prediction even if target is NaN
     # Only drop NaN from training data, keep latest for prediction
@@ -422,12 +430,13 @@ def add_mempool_analysis(df_blockchain, current_mempool):
     
     # Calculate transaction count variance
     df_blockchain['tx_count_change'] = df_blockchain['transaction_count'].pct_change()
-    df_blockchain['tx_variance'] = df_blockchain['transaction_count'].rolling(window=7).std() / df_blockchain['transaction_count'].rolling(window=7).mean()
+    tx_mean = df_blockchain['transaction_count'].rolling(window=7).mean()
+    df_blockchain['tx_variance'] = df_blockchain['transaction_count'].rolling(window=7).std() / (tx_mean + 1e-8)
     
     # Add moving averages for transaction trends
     df_blockchain['tx_ma_7'] = df_blockchain['transaction_count'].rolling(window=7).mean()
     df_blockchain['tx_ma_14'] = df_blockchain['transaction_count'].rolling(window=14).mean()
-    df_blockchain['tx_trend'] = (df_blockchain['tx_ma_7'] / df_blockchain['tx_ma_14'] - 1) * 100
+    df_blockchain['tx_trend'] = (df_blockchain['tx_ma_7'] / (df_blockchain['tx_ma_14'] + 1e-8) - 1) * 100
     
     # Mempool congestion analysis
     mempool_size = current_mempool.get('mempool_size', 100000000)  # Default 100MB
@@ -455,11 +464,13 @@ def add_mempool_analysis(df_blockchain, current_mempool):
     df_blockchain['mempool_congestion'] = np.clip(df_blockchain['mempool_size'] / 200000000, 0, 1)
     
     # Transaction efficiency metrics
-    df_blockchain['tx_per_block'] = df_blockchain['transaction_count'] / 144  # Assuming ~144 blocks per day
+    df_blockchain['tx_per_block'] = df_blockchain['transaction_count'] / 144.0  # Assuming ~144 blocks per day
+    tx_mean = df_blockchain['transaction_count'].mean()
+    fee_mean = df_blockchain['avg_fee'].mean()
     df_blockchain['network_activity_score'] = (
-        df_blockchain['transaction_count'] / df_blockchain['transaction_count'].mean() * 0.5 +
+        df_blockchain['transaction_count'] / (tx_mean + 1e-8) * 0.5 +
         (1 - df_blockchain['mempool_congestion']) * 0.3 +
-        (1 / (df_blockchain['avg_fee'] / df_blockchain['avg_fee'].mean())) * 0.2
+        (1 / ((df_blockchain['avg_fee'] / (fee_mean + 1e-8)) + 1e-8)) * 0.2
     )
     
     print(f"   ⏱️  Current estimated confirmation time: {estimated_conf_time:.1f} minutes")
@@ -513,6 +524,12 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
         
         # Transaction volume vs price variance
         price_volatility = price_change.rolling(window=7).std()
+        
+        # Check if tx_variance exists, if not calculate it
+        if 'tx_variance' not in merged_df.columns:
+            tx_mean = merged_df['transaction_count'].rolling(window=7).mean()
+            merged_df['tx_variance'] = merged_df['transaction_count'].rolling(window=7).std() / (tx_mean + 1e-8)
+        
         tx_volatility = merged_df['tx_variance']
         
         vol_correlation = price_volatility.corr(tx_volatility)
@@ -525,45 +542,52 @@ def merge_price_and_blockchain_data(price_df, blockchain_df):
         merged_df['price_volatility'] = price_volatility
         merged_df['price_change'] = price_change
         
-        # Network stress indicators
+        # Network stress indicators - check if columns exist
+        mempool_congestion = merged_df.get('mempool_congestion', pd.Series([0.5]*len(merged_df), index=merged_df.index))
+        estimated_conf_time = merged_df.get('estimated_conf_time', pd.Series([60]*len(merged_df), index=merged_df.index))
+        
         merged_df['network_stress'] = (
-            merged_df['mempool_congestion'] * 0.4 +
-            (merged_df['estimated_conf_time'] / 240) * 0.3 +  # Normalize to 4-hour scale
+            mempool_congestion * 0.4 +
+            (estimated_conf_time / 240) * 0.3 +  # Normalize to 4-hour scale
             merged_df['tx_variance'] * 0.3
         )
         
         # Transaction momentum indicators - check if columns exist first
-        if 'tx_ma_7' in merged_df.columns and 'transaction_count' in merged_df.columns:
-            merged_df['tx_momentum'] = merged_df['transaction_count'] / merged_df['tx_ma_7']
+        if 'tx_ma_7' not in merged_df.columns:
+            merged_df['tx_ma_7'] = merged_df['transaction_count'].rolling(window=7).mean()
+        
+        if 'transaction_count' in merged_df.columns:
+            merged_df['tx_momentum'] = merged_df['transaction_count'] / (merged_df['tx_ma_7'] + 1e-8)
         else:
             merged_df['tx_momentum'] = 1.0  # Default neutral momentum
             
-        if 'tx_trend' in merged_df.columns:
-            merged_df['tx_acceleration'] = merged_df['tx_trend'].diff()
-        else:
-            merged_df['tx_acceleration'] = 0.0  # Default no acceleration
+        if 'tx_trend' not in merged_df.columns:
+            tx_ma_14 = merged_df['transaction_count'].rolling(window=14).mean()
+            merged_df['tx_trend'] = (merged_df['tx_ma_7'] / (tx_ma_14 + 1e-8) - 1) * 100
+            
+        merged_df['tx_acceleration'] = merged_df['tx_trend'].diff()
     
     return merged_df
 
 
 
-def create_30min_data(df_daily):
-    """Convert daily data to 30-minute intervals using interpolation and noise."""
-    print("🔄 Converting daily data to 30-minute intervals...")
+def create_15min_data(df_daily):
+    """Convert daily data to 15-minute intervals using interpolation and noise."""
+    print("🔄 Converting daily data to 15-minute intervals...")
     
     # Ensure we have a datetime column
     df_daily = df_daily.copy()
     df_daily['date'] = pd.to_datetime(df_daily['date'])
     
-    # Create 30-minute intervals for the last 7 days to have enough data for 12-hour forecast
+    # Create 15-minute intervals for the last 7 days to have enough data for 24-hour forecast
     end_date = df_daily['date'].max()
     start_date = end_date - timedelta(days=7)
     
-    # Create 30-minute timestamps
-    timestamps_30min = pd.date_range(
+    # Create 15-minute timestamps
+    timestamps_15min = pd.date_range(
         start=start_date, 
         end=end_date, 
-        freq='30min'
+        freq='15min'
     )
     
     # Get the last 7 days of daily data
@@ -573,38 +597,38 @@ def create_30min_data(df_daily):
         print("   ⚠️  No recent data available, using last available data")
         recent_daily = df_daily.tail(7)
     
-    # Create 30-minute dataframe
-    df_30min = pd.DataFrame({'date': timestamps_30min})
+    # Create 15-minute dataframe
+    df_15min = pd.DataFrame({'date': timestamps_15min})
     
     # Interpolate prices with realistic intraday variation
     base_prices = np.interp(
-        timestamps_30min.astype(np.int64),
+        timestamps_15min.astype(np.int64),
         recent_daily['date'].astype(np.int64),
         recent_daily['price']
     )
     
     # Add realistic intraday volatility (smaller than daily volatility)
     daily_volatility = recent_daily['price'].pct_change().std()
-    intraday_volatility = daily_volatility * 0.3  # 30% of daily volatility for 30-min intervals
+    intraday_volatility = daily_volatility * 0.2  # 20% of daily volatility for 15-min intervals
     
     # Add random walk with intraday patterns
-    random_walk = np.random.normal(0, intraday_volatility, len(timestamps_30min))
+    random_walk = np.random.normal(0, intraday_volatility, len(timestamps_15min))
     
     # Add time-of-day effects (higher volatility during trading hours)
-    hours = timestamps_30min.hour
+    hours = timestamps_15min.hour
     time_effect = 1 + 0.5 * np.sin(2 * np.pi * (hours - 12) / 24)  # Peak around noon
     
     # Combine effects
     price_variations = random_walk * time_effect
-    df_30min['price'] = base_prices * (1 + price_variations)
+    df_15min['price'] = base_prices * (1 + price_variations)
     
     # Ensure prices are positive and reasonable
-    df_30min['price'] = np.maximum(df_30min['price'], base_prices * 0.95)
+    df_15min['price'] = np.maximum(df_15min['price'], base_prices * 0.95)
     
-    print(f"   ✅ Created {len(df_30min)} 30-minute data points")
-    print(f"   📊 Price range: ${df_30min['price'].min():.2f} - ${df_30min['price'].max():.2f}")
+    print(f"   ✅ Created {len(df_15min)} 15-minute data points")
+    print(f"   📊 Price range: ${df_15min['price'].min():.2f} - ${df_15min['price'].max():.2f}")
     
-    return df_30min
+    return df_15min
 
 
 def main():
@@ -1022,12 +1046,12 @@ def main():
         print("🔮 RUNNING ENHANCED FORECASTING SYSTEM")
         print("="*80)
         
-        # Convert daily data to 30-minute intervals by interpolation
-        # This simulates having 30-minute data
-        df_30min = create_30min_data(df)
+        # Convert daily data to 15-minute intervals by interpolation
+        # This simulates having 15-minute data
+        df_15min = create_15min_data(df)
         
         # Run enhanced forecasting
-        enhanced_results = run_enhanced_forecasting(df_30min)
+        enhanced_results = run_enhanced_forecasting(df_15min)
         
         if enhanced_results:
             print("\n✅ Enhanced forecasting completed successfully!")
@@ -1043,7 +1067,7 @@ def main():
                 print("💡 In production, this would run indefinitely with 5-minute intervals")
                 
                 # Run a short demo (3 minutes)
-                continuous_system = run_continuous_training_demo(df_30min, duration_minutes=3)
+                continuous_system = run_continuous_training_demo(df_15min, duration_minutes=3)
                 
                 print("\n✅ Continuous training demonstration completed!")
                 

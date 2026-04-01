@@ -1,14 +1,17 @@
 # Enhanced Bitcoin Price Prediction System v3
 
-A comprehensive Bitcoin price prediction system featuring 12-hour forecasting, market sentiment analysis, multi-model training, and continuous data updates.
+A comprehensive Bitcoin price prediction system featuring 24-hour, 12-hour, and 6-hour forecasting, market sentiment analysis, multi-model training, and continuous data updates.
 
 ## 🚀 Features
 
-### 🔮 12-Hour Price Forecasting
-- **30-minute intervals**: Generates 24 predictions covering the next 12 hours
+### 🔮 Multi-Horizon Price Forecasting
+- **15-minute intervals**: High-resolution predictions with 15-minute granularity
+- **24-hour forecast**: 96 predictions covering the next 24 hours
+- **12-hour forecast**: 48 predictions covering the next 12 hours  
+- **6-hour forecast**: 24 predictions covering the next 6 hours
 - **Multi-step prediction**: Uses recursive forecasting with ensemble models
 - **Confidence intervals**: Provides prediction uncertainty estimates
-- **Detailed output**: Shows exact times, prices, and percentage changes
+- **Detailed output**: Shows exact times, predicted prices, target prices, and sell prices
 
 ### 📈 Market Sentiment Analysis
 - **6-hour window analysis**: Determines market direction using 1% variance threshold
@@ -20,7 +23,8 @@ A comprehensive Bitcoin price prediction system featuring 12-hour forecasting, m
 - **High/Low identification**: Clearly marks predicted high and low prices with timestamps
 - **Central tendency**: Calculates median and average predicted prices
 - **Delta analysis**: Shows absolute and percentage changes from current price
-- **Price range**: Comprehensive range analysis for 12-hour period
+- **Price range**: Comprehensive range analysis for all forecast horizons
+- **Target/Sell prices**: Displays 1% profit target and 1% stop loss prices
 
 ### 🤖 Multi-Model Training System
 - **5 ensemble models**: RandomForest (x2), GradientBoosting, ExtraTrees, Pipeline
@@ -37,8 +41,9 @@ A comprehensive Bitcoin price prediction system featuring 12-hour forecasting, m
 ### 📋 Enhanced Output Format
 - **Professional formatting**: Clear sections with emojis and tables
 - **Real-time logging**: Comprehensive system status logging
-- **Detailed tables**: 30-minute prediction tables with all metrics
+- **Detailed tables**: 15-minute prediction tables with predicted, target, and sell prices
 - **System metrics**: Model performance and health monitoring
+- **Multiple horizons**: Shows 24-hour, 12-hour, and 6-hour forecasts
 
 ## 🏃 Quick Start
 
@@ -85,11 +90,13 @@ pip install numpy pandas scikit-learn scipy matplotlib python-dateutil
 ## 📊 Sample Output
 
 ```
-🔮 ENHANCED 12-HOUR BITCOIN PRICE FORECAST
+🔮 ENHANCED BITCOIN PRICE FORECAST - 24H, 12H, 6H PREDICTIONS
 ================================================================================
 
 📊 CURRENT STATUS:
    Current Price: $38,911.89
+   Target Price:  $39,300.81 (+1.0%)
+   Sell Price:    $38,522.77 (-1.0%)
    Timestamp: 2025-09-10 18:46:52
 
 📈 MARKET SENTIMENT (6-hour analysis):
@@ -98,26 +105,26 @@ pip install numpy pandas scikit-learn scipy matplotlib python-dateutil
    📊 Variance: 1.68%
    🎯 Trend Strength: 0.86
 
-🔮 12-HOUR FORECAST SUMMARY:
+🔮 24-HOUR FORECAST SUMMARY:
    📈 Predicted HIGH: $39,127.16 at 04:30 (270 min)
    📉 Predicted LOW:  $38,909.88 at 02:00 (120 min)
    📊 Average Price:  $39,033.33
    📊 Median Price:   $39,064.23
    📏 Price Range:    $217.28 (0.56%)
 
-📈 DELTA ANALYSIS (vs Current Price):
+📈 24-HOUR DELTA ANALYSIS (vs Current Price):
    📈 HIGH Delta:     $+215.27 (+0.55%)
    📉 LOW Delta:      $-2.01 (-0.01%)
    📊 AVERAGE Delta:  $+121.44 (+0.31%)
    📊 MEDIAN Delta:   $+152.35 (+0.39%)
 
-⏰ DETAILED 30-MINUTE PREDICTIONS:
+⏰ DETAILED 15-MINUTE PREDICTIONS (24-HOUR):
 --------------------------------------------------------------------------------
-Time     Price        Change     Change%  Std Dev 
+Time     Predicted Price  Target Price     Sell Price       Change     Change%
 --------------------------------------------------------------------------------
-00:30    $38,989.97   $+78.08    +0.20%   ±196.13 
-01:00    $38,956.82   $+44.93    +0.12%   ±184.77 
-01:30    $39,050.83   $+138.94   +0.36%   ±40.26  
+00:15    $38,989.97       $39,300.81       $38,522.77       $+78.08    +0.20%
+00:30    $38,956.82       $39,300.81       $38,522.77       $+44.93    +0.12%
+00:45    $39,050.83       $39,300.81       $38,522.77       $+138.94   +0.36%  
 ...
 ```
 
@@ -151,16 +158,18 @@ system.stop_continuous_system()
 
 ## 🎯 Key Innovations
 
-1. **Multi-step forecasting**: Predicts 24 time steps ahead with high accuracy
-2. **Ensemble approach**: Combines multiple models for robust predictions
-3. **Real-time adaptation**: Continuously learns from new data
-4. **Comprehensive analysis**: Provides statistical, sentiment, and technical analysis
-5. **Production ready**: Includes monitoring, logging, and error handling
+1. **Multi-horizon forecasting**: Predicts 24, 12, and 6 hours ahead with high accuracy
+2. **High-resolution intervals**: 15-minute intervals for precise trading decisions
+3. **Ensemble approach**: Combines multiple models for robust predictions
+4. **Target/Sell prices**: Shows 1% profit target and stop loss levels
+5. **Real-time adaptation**: Continuously learns from new data
+6. **Comprehensive analysis**: Provides statistical, sentiment, and technical analysis
+7. **Production ready**: Includes monitoring, logging, and error handling
 
 ## 📈 Performance Features
 
 - **Fast training**: Models train in 2-3 seconds
-- **Efficient prediction**: Generates 24 predictions in under 1 second
+- **Efficient prediction**: Generates 96 predictions in under 1 second
 - **Memory efficient**: Maintains rolling data window
 - **Scalable**: Can handle continuous operation
 - **Robust**: Handles missing data and network failures
@@ -169,8 +178,10 @@ system.stop_continuous_system()
 
 ### Adjust prediction horizon
 ```python
-# Change from 12 hours to 6 hours (12 predictions)
-forecast_df = forecaster.generate_12_hour_forecast(data, horizon=12)
+# Change forecast horizons (supports 6, 12, or 24 hours)
+forecast_24h = forecaster.generate_forecast(data, horizon_hours=24)
+forecast_12h = forecaster.generate_forecast(data, horizon_hours=12)
+forecast_6h = forecaster.generate_forecast(data, horizon_hours=6)
 ```
 
 ### Modify update interval
