@@ -1,4 +1,13 @@
-# .github/workflows/terraform.yml @ ref a181e6187478cea4fcee56839a3188af7a6ff8a7
+# .github/workflows/terraform.yml
+name: Terraform
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'releases/*'
 
 jobs:
   terraform:
@@ -16,8 +25,10 @@ jobs:
       - name: Detect Terraform files
         id: tfcheck
         run: |
-          if ls -1 **/*.tf 1>/dev/null 2>&1; then
+          tf_dir="$(find . -type f -name '*.tf' -not -path '*/.terraform/*' | head -n1 | xargs -I{} dirname "{}")"
+          if [[ -n "$tf_dir" ]]; then
             echo "has_tf=true" >> "$GITHUB_OUTPUT"
+            echo "tf_dir=$tf_dir" >> "$GITHUB_OUTPUT"
           else
             echo "has_tf=false" >> "$GITHUB_OUTPUT"
           fi
@@ -30,12 +41,15 @@ jobs:
 
       - name: Terraform Init
         if: steps.tfcheck.outputs.has_tf == 'true'
+        working-directory: ${{ steps.tfcheck.outputs.tf_dir }}
         run: terraform init
 
       - name: Terraform Format
         if: steps.tfcheck.outputs.has_tf == 'true'
+        working-directory: ${{ steps.tfcheck.outputs.tf_dir }}
         run: terraform fmt -check
 
       - name: Terraform Plan
         if: steps.tfcheck.outputs.has_tf == 'true'
-        run: terraform plan -input=falseove -input=false
+        working-directory: ${{ steps.tfcheck.outputs.tf_dir }}
+        run: terraform plan -input=false
