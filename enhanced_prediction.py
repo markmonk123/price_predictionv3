@@ -13,15 +13,49 @@ try:
     from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
     from sklearn.linear_model import LogisticRegression
     from sklearn.svm import SVC
-    from sklearn.preprocessing import StandardScaler
+    from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, QuantileTransformer
     from sklearn.pipeline import Pipeline
 except Exception:
     RandomForestClassifier = GradientBoostingClassifier = VotingClassifier = None
     train_test_split = cross_val_score = None
     classification_report = confusion_matrix = accuracy_score = None
     LogisticRegression = SVC = None
-    StandardScaler = None
+    StandardScaler = MinMaxScaler = RobustScaler = PowerTransformer = QuantileTransformer = None
     Pipeline = None
+
+# ---------------------------------------------------------------------------
+# CUDA / cuML acceleration — auto-detected on WSL with an NVIDIA GPU.
+# cuML provides GPU-accelerated drop-in replacements for sklearn estimators.
+# Falls back silently to sklearn CPU paths if CUDA / cuML is unavailable.
+# WSL requirement: NVIDIA driver ≥ 525 + CUDA toolkit visible inside WSL.
+# ---------------------------------------------------------------------------
+CUDA_AVAILABLE = False
+_gpu_count = 0
+_cuml_RF = None
+_cuml_LR = None
+_cuml_StandardScaler = None
+_cuml_MinMaxScaler = None
+_cuml_RobustScaler = None
+try:
+    import cuml  # noqa: F401 — RAPIDS cuML
+    from cuml.ensemble import RandomForestClassifier as _cuRF
+    from cuml.linear_model import LogisticRegression as _cuLR
+    import cuml.preprocessing as _cuml_prep
+    import cupy as cp  # CUDA array library bundled with RAPIDS
+
+    _gpu_count = cp.cuda.runtime.getDeviceCount()
+    if _gpu_count > 0:
+        CUDA_AVAILABLE = True
+        # Return numpy arrays from all cuML ops so sklearn utilities remain compatible
+        cuml.set_global_output_type('numpy')
+        _cuml_RF = _cuRF
+        _cuml_LR = _cuLR
+        _cuml_StandardScaler = _cuml_prep.StandardScaler
+        _cuml_MinMaxScaler = _cuml_prep.MinMaxScaler
+        _cuml_RobustScaler = _cuml_prep.RobustScaler
+except Exception:
+    pass  # No CUDA / cuML available — silently continue with CPU sklearn
+
 try:
     from scipy import stats
 except Exception:
@@ -238,7 +272,7 @@ def create_enhanced_features(df, pct_threshold=0.002):
 
 def fetch_bitcoin_data(num_points=36000, interval_minutes=1):
     """Fetch a specific number of Bitcoin price data points from Coinbase API.
-    Falls back to simulated data on any error or if 'requests' is unavailable.
+    Fails hard on any error or if 'requests' is unavailable.
     Requires pandas and numpy when returning data.
     """
     if pd is None or np is None:
@@ -300,16 +334,7 @@ def fetch_bitcoin_data(num_points=36000, interval_minutes=1):
         return df[["date", "price", "high", "low"]].dropna()
         
     except Exception as e:
-        print(f"API Error: {e}. Using simulated data...")
-        dates = pd.date_range(
-            start=datetime.now(timezone.utc) - timedelta(minutes=num_points),
-            periods=num_points,
-            freq=f'{interval_minutes}min',
-            tz='UTC'
-        )
-        prices = np.cumsum(np.random.randn(num_points) * 2) + 60000
-        noise = np.abs(np.random.randn(num_points) * 15)
-        return pd.DataFrame({'date': dates, 'price': prices, 'high': prices + noise, 'low': prices - noise})
+        raise RuntimeError(f"Coinbase API fetch failed: {e}") from e
 
 def calculate_next_hl_window(row):
     """Use Bollinger Band %B and sma_volatility_10 to project the next high/low price window.
@@ -474,10 +499,466 @@ def identify_long_signal_lrs(df, adx_threshold=25, lr_period=30):
     return result
 
 
+class SignalVotingEngine:
+    """
+    Multi-framework voting engine that aggregates three independent economic and
+    game-theory lenses to produce a conviction-weighted final trade direction.
+
+    Frameworks
+    ----------
+    Adam Smith (1776) — The Wealth of Nations
+        The invisible hand drives prices toward their natural (equilibrium) level
+        through self-interested supply and demand. When market price deviates above
+        natural price demand is dominant (LONG); below, supply dominates (SHORT).
+        Modelled via price-vs-SMA, BB position, and RSI heat.
+
+    Bruce Bueno de Mesquita — Expected Utility (EU) Game Theory
+        Stakeholders (bulls, bears) each have Capability (di_plus / di_minus),
+        Salience (ADX, how much the trend matters), and a Position (reinforced by
+        DPO and MACD histogram sign). EU_bull vs EU_bear determines the net
+        expected utility: positive → LONG, negative → SHORT.
+
+    John Nash (Nobel 1994) — Nash Equilibrium & Dominant Strategy
+        A dominant strategy is one that is optimal regardless of what the opposing
+        players do. When a clear majority of independent momentum indicators
+        (DPO, LR Slope, MACD histogram, BB position) agree on a direction, a
+        dominant strategy exists. When indicators are split, the market is in a
+        mixed-strategy Nash equilibrium — no trade (abstain).
+    """
+
+    ADX_MIN = 25  # Minimum ADX for BdM to vote
+    DOMINANT_THRESHOLD = 0.75  # Fraction of indicators that must agree for Nash dominant strategy
+    VOTE_DEADBAND = 0.12  # Score must exceed this magnitude for a directional final vote
+
+    # --- Framework 1: Adam Smith ---
+    def _adam_smith_vote(self, row):
+        """Invisible hand: market price vs natural price via supply/demand balance."""
+        score = 0.0
+        price = row.get('price', 1.0)
+
+        # Supply/demand: price vs short and medium-term natural price (SMA)
+        for sma_col, weight in [('sma_30', 0.20), ('sma_120', 0.20)]:
+            sma_val = row.get(sma_col, None)
+            if sma_val is not None and sma_val > 0:
+                score += weight if price > sma_val else -weight
+
+        # Bollinger Band position: 0=lower band, 1=upper band; 0.5=natural price
+        bb_pos = row.get('bb_position', 0.5)
+        score += (bb_pos - 0.5) * 0.80  # +0.4 max long, -0.4 max short
+
+        # RSI: overbought/oversold as self-correcting market signal
+        rsi = row.get('rsi_14', 50.0)
+        if 30 <= rsi <= 70:
+            score += 0.10 if rsi > 50 else -0.10  # Trend continuation in healthy range
+        elif rsi > 70:
+            score -= 0.25  # Overbought — Smith: market will self-correct downward
+        elif rsi < 30:
+            score += 0.25  # Oversold — Smith: market will self-correct upward
+
+        direction = 1 if score > self.VOTE_DEADBAND else (-1 if score < -self.VOTE_DEADBAND else 0)
+        conviction = min(abs(score), 1.0)
+        return direction, conviction, f"score={score:+.3f}  price/SMA={'above' if price > row.get('sma_30', price) else 'below'}  BB%={bb_pos*100:.1f}  RSI={rsi:.1f}"
+
+    # --- Framework 2: Bruce Bueno de Mesquita Expected Utility ---
+    def _bdm_vote(self, row):
+        """EU model: capability × salience × position for bulls vs bears."""
+        adx = row.get('adx', 0.0)
+        di_plus = row.get('di_plus', 0.0)
+        di_minus = row.get('di_minus', 0.0)
+        dpo = row.get('dpo', 0.0)
+        macd_hist = row.get('macd_histogram', 0.0)
+
+        if adx < self.ADX_MIN:
+            return 0, 0.0, f"ADX={adx:.1f} below threshold — abstain (trend lacks conviction)"
+
+        # Salience: how much does the trend strength matter right now?
+        salience = min(adx / 100.0, 1.0)
+
+        # Capability-position product for each stakeholder group
+        # Partial credit (0.4) when a confirming indicator is absent to model uncertainty
+        bull_eu = (
+            (di_plus / 100.0)
+            * salience
+            * (1.0 if dpo > 0 else 0.4)
+            * (1.0 if macd_hist > 0 else 0.4)
+        )
+        bear_eu = (
+            (di_minus / 100.0)
+            * salience
+            * (1.0 if dpo < 0 else 0.4)
+            * (1.0 if macd_hist < 0 else 0.4)
+        )
+
+        net_eu = bull_eu - bear_eu
+        total_eu = bull_eu + bear_eu + 1e-8
+        conviction = min(abs(net_eu) / total_eu, 1.0)
+
+        direction = 1 if net_eu > 0 else (-1 if net_eu < 0 else 0)
+        return direction, conviction, (
+            f"EU_bull={bull_eu:.4f}  EU_bear={bear_eu:.4f}  net={net_eu:+.4f}  "
+            f"ADX={adx:.1f}  DI+={di_plus:.1f}  DI-={di_minus:.1f}"
+        )
+
+    # --- Framework 3: John Nash Dominant Strategy ---
+    def _nash_vote(self, row, lr_period=30):
+        """Dominant strategy theory: unanimous indicator agreement → exploitable signal.
+        Near Nash equilibrium (all indicators near zero) → mixed strategy → abstain.
+        """
+        price = row.get('price', 1.0) or 1.0
+        lr_col = f'lr_slope_{lr_period}'
+
+        # Collect independent directional votes from momentum/position indicators
+        indicator_votes = {}
+        for col, label in [
+            ('dpo', 'DPO'),
+            (lr_col, 'LRS'),
+            ('macd_histogram', 'MACD'),
+        ]:
+            val = row.get(col, None)
+            if val is not None:
+                indicator_votes[label] = 1 if val > 0 else -1
+
+        bb_pos = row.get('bb_position', None)
+        if bb_pos is not None:
+            indicator_votes['BB'] = 1 if bb_pos > 0.5 else -1
+
+        if not indicator_votes:
+            return 0, 0.0, 'Nash: no indicators available'
+
+        votes = list(indicator_votes.values())
+        total = len(votes)
+        bull_count = sum(1 for v in votes if v == 1)
+        bear_count = total - bull_count
+        agreement_ratio = max(bull_count, bear_count) / total
+
+        # Check for near-equilibrium (Nash NE): small DPO and MACD relative to price
+        dpo_pct = abs(row.get('dpo', 1.0)) / price
+        macd_pct = abs(row.get('macd_histogram', 1.0)) / price
+        near_eq = dpo_pct < 0.001 and macd_pct < 0.0001
+
+        if near_eq or agreement_ratio < self.DOMINANT_THRESHOLD:
+            summary = '  '.join(f"{k}={'↑' if v==1 else '↓'}" for k, v in indicator_votes.items())
+            reason = ('near equilibrium' if near_eq else f'mixed strategy (agree={agreement_ratio:.0%})')
+            return 0, 0.0, f'Nash: {reason}  [{summary}]'
+
+        direction = 1 if bull_count > bear_count else -1
+        conviction = agreement_ratio
+        summary = '  '.join(f"{k}={'↑' if v==1 else '↓'}" for k, v in indicator_votes.items())
+        return direction, conviction, f'Nash: dominant strategy (agree={agreement_ratio:.0%})  [{summary}]'
+
+    # --- Aggregation ---
+    def evaluate(self, row, lr_period=30):
+        """Aggregate all three framework votes into a final conviction-weighted signal.
+
+        Returns a dict with keys:
+            direction       int   +1 LONG / -1 SHORT / 0 NEUTRAL
+            recommendation  str   'LONG' / 'SHORT' / 'NEUTRAL'
+            weighted_score  float conviction-weighted net score
+            conviction      float 0.0 – 1.0
+            frameworks      list  [(name, direction, conviction, reason), ...]
+        """
+        smith_dir, smith_conv, smith_reason = self._adam_smith_vote(row)
+        bdm_dir,   bdm_conv,   bdm_reason   = self._bdm_vote(row)
+        nash_dir,  nash_conv,  nash_reason  = self._nash_vote(row, lr_period)
+
+        frameworks = [
+            ('Adam Smith',          smith_dir, smith_conv, smith_reason),
+            ('BdM Exp. Utility',    bdm_dir,   bdm_conv,   bdm_reason),
+            ('Nash Equilibrium',    nash_dir,  nash_conv,  nash_reason),
+        ]
+
+        # Conviction-weighted vote aggregation
+        weighted_sum = sum(d * c for _, d, c, _ in frameworks if d != 0)
+        total_weight = sum(c for _, d, c, _ in frameworks if d != 0)
+
+        if total_weight < 1e-8:
+            final_dir, final_conv, raw_score = 0, 0.0, 0.0
+        else:
+            raw_score = weighted_sum / total_weight
+            final_conv = min(abs(raw_score), 1.0)
+            final_dir = 1 if raw_score > self.VOTE_DEADBAND else (-1 if raw_score < -self.VOTE_DEADBAND else 0)
+
+        return {
+            'direction':      final_dir,
+            'recommendation': 'LONG' if final_dir == 1 else ('SHORT' if final_dir == -1 else 'NEUTRAL'),
+            'weighted_score': raw_score,
+            'conviction':     final_conv,
+            'frameworks':     frameworks,
+        }
+
+    def evaluate_latest(self, df, lr_period=30):
+        """Evaluate the most recent row of the feature DataFrame."""
+        return self.evaluate(df.iloc[-1], lr_period=lr_period)
+
+
+# ---------------------------------------------------------------------------
+# GPU-aware factory helpers
+# Each helper transparently selects the cuML GPU implementation when CUDA is
+# available, stripping parameters that cuML does not support, then falls back
+# to the standard sklearn implementation on CPU.
+# ---------------------------------------------------------------------------
+
+def _gpu_rf(**kwargs):
+    """Return a RandomForestClassifier, preferring cuML when CUDA is available.
+
+    cuML RF does not accept `n_jobs` (GPU parallelism is implicit).
+    All other sklearn-compatible kwargs are forwarded as-is.
+    """
+    if CUDA_AVAILABLE and _cuml_RF is not None:
+        gpu_kw = {k: v for k, v in kwargs.items() if k != 'n_jobs'}
+        return _cuml_RF(**gpu_kw)
+    return RandomForestClassifier(**kwargs)
+
+
+def _gpu_lr(**kwargs):
+    """Return a LogisticRegression, preferring cuML when CUDA is available.
+
+    cuML LR does not accept `class_weight` or `random_state`.
+    All other sklearn-compatible kwargs (e.g. max_iter, C) are forwarded.
+    """
+    if CUDA_AVAILABLE and _cuml_LR is not None:
+        gpu_kw = {k: v for k, v in kwargs.items() if k not in ('class_weight', 'random_state')}
+        return _cuml_LR(**gpu_kw)
+    return LogisticRegression(**kwargs)
+
+
+def _gpu_scalers():
+    """Build the five-scaler dict, substituting cuML GPU scalers where supported.
+
+    PowerTransformer and QuantileTransformer have no cuML equivalent and always
+    run on CPU via sklearn regardless of CUDA availability.
+    """
+    if CUDA_AVAILABLE and _cuml_StandardScaler is not None:
+        return {
+            'StandardScaler':     _cuml_StandardScaler(),
+            'MinMaxScaler':       _cuml_MinMaxScaler(),
+            'RobustScaler':       _cuml_RobustScaler(),
+            'PowerTransformer':   PowerTransformer(method='yeo-johnson'),   # CPU only
+            'QuantileTransformer': QuantileTransformer(output_distribution='normal'),  # CPU only
+        }
+    return {
+        'StandardScaler':     StandardScaler(),
+        'MinMaxScaler':       MinMaxScaler(),
+        'RobustScaler':       RobustScaler(),
+        'PowerTransformer':   PowerTransformer(method='yeo-johnson'),
+        'QuantileTransformer': QuantileTransformer(output_distribution='normal'),
+    }
+
+
+def _cpu_scaler_by_name(name):
+    """Return the sklearn CPU scaler instance for a given scaler label."""
+    if name == 'StandardScaler':
+        return StandardScaler()
+    if name == 'MinMaxScaler':
+        return MinMaxScaler()
+    if name == 'RobustScaler':
+        return RobustScaler()
+    if name == 'PowerTransformer':
+        return PowerTransformer(method='yeo-johnson')
+    if name == 'QuantileTransformer':
+        return QuantileTransformer(output_distribution='normal')
+    raise ValueError(f"Unknown scaler name: {name}")
+
+
+class ScalerEvaluator:
+    """Evaluates 5 different scalers and ranks them by cross-validation performance."""
+    
+    @staticmethod
+    def evaluate(X_train, y_train, cv=3):
+        """Rank scalers by average cross-validation accuracy.
+        
+        Returns:
+            list: [(scaler_name, avg_cv_score, scaler_object), ...] sorted descending by score
+        """
+        from sklearn.model_selection import cross_val_score
+        
+        results = []
+        # _gpu_scalers() returns cuML implementations when CUDA is available
+        scalers = _gpu_scalers()
+        for name, scaler in scalers.items():
+            try:
+                X_scaled = scaler.fit_transform(X_train)
+                rf = _gpu_rf(n_estimators=50, max_depth=10, random_state=42, n_jobs=-1)
+                scores = cross_val_score(rf, X_scaled, y_train, cv=cv, scoring='accuracy')
+                avg_score = scores.mean()
+                results.append((name, avg_score, scaler))
+            except Exception as e:
+                print(f"    ⚠  {name} GPU-path eval failed: {e}. Retrying on CPU scaler.")
+                try:
+                    cpu_scaler = _cpu_scaler_by_name(name)
+                    X_scaled_cpu = cpu_scaler.fit_transform(X_train)
+                    rf_cpu = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42, n_jobs=-1)
+                    scores_cpu = cross_val_score(rf_cpu, X_scaled_cpu, y_train, cv=cv, scoring='accuracy')
+                    avg_score_cpu = scores_cpu.mean()
+                    results.append((name, avg_score_cpu, cpu_scaler))
+                except Exception as e_cpu:
+                    print(f"    ⚠  {name} CPU fallback eval failed: {e_cpu}")
+        
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results
+
+
+class EnsembleConfidenceBooster:
+    """Multi-scaler ensemble to verify and boost voting engine confidence.
+    
+    Uses the top 3 scalers, each paired with RF, GB, LR for a 3×3 parallel ensemble.
+    Each model votes on direction; majority vote + average confidence boost the signal.
+    """
+    
+    def __init__(self, scalers_list, X_train, y_train, random_state=42):
+        """Initialize with top 3 (scaler, X_scaled) pairs and train models.
+        
+        Args:
+            scalers_list: list of (scaler_name, avg_cv_score, scaler_object) tuples (top 3)
+            X_train: training features
+            y_train: training labels
+        """
+        self.models = {}
+        
+        for scaler_name, _, scaler in scalers_list[:3]:
+            try:
+                X_scaled = scaler.fit_transform(X_train)
+            except Exception as e:
+                print(f"    ⚠  {scaler_name} scaler failed in booster: {e}. Falling back to CPU scaler.")
+                scaler = _cpu_scaler_by_name(scaler_name)
+                X_scaled = scaler.fit_transform(X_train)
+            self.models[scaler_name] = {}
+            
+            # Random Forest
+            # _gpu_rf strips n_jobs (implicit on GPU); all other kwargs forwarded
+            try:
+                rf = _gpu_rf(
+                    n_estimators=100, max_depth=12, min_samples_split=5,
+                    class_weight='balanced', random_state=random_state, n_jobs=-1
+                )
+            except Exception:
+                rf = RandomForestClassifier(
+                    n_estimators=100, max_depth=12, min_samples_split=5,
+                    class_weight='balanced', random_state=random_state, n_jobs=-1
+                )
+            rf.fit(X_scaled, y_train)
+            self.models[scaler_name]['rf'] = (rf, scaler)
+            
+            # Gradient Boosting
+            gb = GradientBoostingClassifier(
+                n_estimators=80, learning_rate=0.1, max_depth=6,
+                random_state=random_state
+            )
+            gb.fit(X_scaled, y_train)
+            self.models[scaler_name]['gb'] = (gb, scaler)
+            
+            # Logistic Regression — _gpu_lr strips class_weight/random_state for cuML
+            try:
+                lr = _gpu_lr(
+                    class_weight='balanced', random_state=random_state, max_iter=1000
+                )
+            except Exception:
+                lr = LogisticRegression(
+                    class_weight='balanced', random_state=random_state, max_iter=1000
+                )
+            lr.fit(X_scaled, y_train)
+            self.models[scaler_name]['lr'] = (lr, scaler)
+    
+    def predict_with_boost(self, X_test_latest):
+        """Predict on single row, returning (direction, boosted_confidence).
+        
+        Args:
+            X_test_latest: single row feature vector (1D array or Series)
+        
+        Returns:
+            (direction, boosted_confidence, breakdown_str)
+        """
+        X_row = X_test_latest.values.reshape(1, -1) if hasattr(X_test_latest, 'values') else X_test_latest.reshape(1, -1)
+        
+        votes = []
+        confidences = []
+        breakdown = []
+        
+        for scaler_name in sorted(self.models.keys()):
+            for model_type in ['rf', 'gb', 'lr']:
+                model, scaler = self.models[scaler_name][model_type]
+                X_scaled = scaler.transform(X_row)
+                pred = model.predict(X_scaled)[0]
+                votes.append(pred)
+                
+                # Get prediction probability/confidence
+                if hasattr(model, 'predict_proba'):
+                    proba = model.predict_proba(X_scaled)[0]
+                    conf = np.max(proba)
+                else:
+                    conf = 0.5  # LR always has proba, but fallback just in case
+                confidences.append(conf)
+                breakdown.append(f"{scaler_name[:8]}_{model_type.upper()}={pred:+d}@{conf:.2f}")
+        
+        # Voting: majority direction
+        vote_sum = sum(votes)
+        final_direction = 1 if vote_sum > 0 else (-1 if vote_sum < 0 else 0)
+        
+        # Confidence boost: average confidences, weighted by vote agreement
+        avg_conf = np.mean(confidences)
+        vote_agreement = abs(vote_sum) / len(votes)  # How unanimous?
+        boosted_conf = avg_conf * vote_agreement
+        
+        breakdown_str = ' | '.join(breakdown)
+        return final_direction, boosted_conf, breakdown_str
+
+
+def fuse_voter_and_ensemble(vote, boost_dir, boost_conf):
+    """Fuse rule/game-theory voter output with ensemble verification.
+
+    Decision policy:
+    - Strong agreement with meaningful confidence -> ACTION.
+    - Disagreement -> HOLD to avoid conflicting regime assumptions.
+    - Low confidence from either side -> HOLD.
+    """
+    voter_dir = vote.get('direction', 0)
+    voter_conf = vote.get('conviction', 0.0)
+
+    min_voter_conf = 0.35
+    min_ens_conf = 0.25
+
+    if voter_dir == 0 or boost_dir == 0:
+        return {
+            'action': 'HOLD',
+            'reason': 'One side is neutral',
+            'score': 0.0,
+            'direction': 0,
+        }
+
+    if voter_dir != boost_dir:
+        return {
+            'action': 'HOLD',
+            'reason': 'Voter and ensemble disagree',
+            'score': -abs(voter_conf - boost_conf),
+            'direction': 0,
+        }
+
+    if voter_conf < min_voter_conf or boost_conf < min_ens_conf:
+        return {
+            'action': 'HOLD',
+            'reason': 'Agreement exists but confidence is too low',
+            'score': (voter_conf + boost_conf) / 2,
+            'direction': 0,
+        }
+
+    fused_conf = (0.6 * voter_conf) + (0.4 * boost_conf)
+    action = 'BUY/LONG' if voter_dir == 1 else 'SELL/SHORT'
+    return {
+        'action': action,
+        'reason': 'Voter-first signal verified by ensemble',
+        'score': fused_conf,
+        'direction': voter_dir,
+    }
+
+
 def main():
     """Enhanced Bitcoin prediction using scikit-learn ensemble on 1-minute data."""
     print("🚀 Enhanced Bitcoin 1-Minute Interval Prediction with Scikit-Learn")
     print("=" * 70)
+    if CUDA_AVAILABLE:
+        print(f"⚡ Backend: CUDA/cuML active ({_gpu_count} GPU(s) detected)")
+    else:
+        print("🧰 Backend: CPU fallback active (CUDA/cuML unavailable)")
     
     # Get data and create features
     raw_df = fetch_bitcoin_data(num_points=36000, interval_minutes=1)
@@ -630,12 +1111,39 @@ def main():
     except ValueError as e:
         print(f"   ⚠  Signal identification error: {e}")
 
+    # --- Economic & Game Theory Voting Engine ---
+    print("\n🏙  Economic & Game Theory Signal Voting Engine")
+    print("   Adam Smith (Supply/Demand)  ·  BdM Expected Utility  ·  Nash Equilibrium")
+    print("   " + "─" * 62)
+    try:
+        engine = SignalVotingEngine()
+        vote = engine.evaluate_latest(df, lr_period=30)
+        for name, direction, conviction, reason in vote['frameworks']:
+            if direction == 1:
+                arrow, colour = "↑ LONG ", "✅"
+            elif direction == -1:
+                arrow, colour = "↓ SHORT", "🔴"
+            else:
+                arrow, colour = "○ NEUT ", "⚪"
+            print(f"   {colour} {name:<22} {arrow}  conviction={conviction:.2f}")
+            print(f"       └ {reason}")
+        print("   " + "─" * 62)
+        rec   = vote['recommendation']
+        score = vote['weighted_score']
+        conv  = vote['conviction']
+        rec_icon = "✅" if rec == 'LONG' else ("🔴" if rec == 'SHORT' else "⚪")
+        print(f"   {rec_icon} FINAL VERDICT  : {rec}")
+        print(f"      Weighted Score : {score:+.4f}")
+        print(f"      Conviction     : {conv:.2%}")
+    except Exception as e:
+        print(f"   ⚠  Voting engine error: {e}")
+
     # Select features (exclude non-predictive columns)
-    feature_cols = [col for col in df.columns if col not in ['date', 'price', 'high', 'low', 'future_price', 'next_return', 'target', 'signal', 'bb_pct']]
+    feature_cols = [col for col in df.columns if col not in ['date', 'price', 'high', 'low', 'future_price', 'next_return', 'target', 'signal', 'bb_pct', 'macd', 'macd_signal']]
     X = df[feature_cols]
     y = df['target']
     
-    print(f"🎯 Using {len(feature_cols)} features for prediction")
+    print(f"\n🎯 Using {len(feature_cols)} features for prediction")
     
     # Class distribution
     class_dist = y.value_counts().sort_index()
@@ -646,6 +1154,37 @@ def main():
     
     # Time series split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+    
+    # --- Scaler Evaluation & Multi-Scaler Ensemble Confidence Booster ---
+    print("\n🔍 Evaluating 5 scalers for optimal feature preprocessing...")
+    scaler_results = ScalerEvaluator.evaluate(X_train, y_train, cv=3)
+    print(f"   Top 3 Scalers (by CV accuracy):")
+    for i, (name, score, _) in enumerate(scaler_results[:3], 1):
+        print(f"   {i}. {name:<25} CV Accuracy: {score:.4f}")
+    
+    print(f"\n🤝 Multi-Scaler Ensemble Confidence Booster (3 scalers × 3 models = 9 voters)")
+    booster = EnsembleConfidenceBooster(scaler_results, X_train, y_train)
+    
+    # Get latest test row for ensemble prediction
+    latest_test_row = X_test.iloc[-1] if len(X_test) > 0 else X_test.iloc[-1]
+    boost_dir, boost_conf, boost_breakdown = booster.predict_with_boost(latest_test_row)
+    
+    print(f"   Ensemble Verdict: {'+1 LONG' if boost_dir==1 else ('-1 SHORT' if boost_dir==-1 else '0 NEUTRAL')}")
+    print(f"   Boosted Confidence: {boost_conf:.2%}")
+    print(f"   Breakdown: {boost_breakdown}")
+    
+    # Synergy check: does ensemble agree with voting engine?
+    voting_rec = vote['recommendation']
+    ensemble_rec = 'LONG' if boost_dir == 1 else ('SHORT' if boost_dir == -1 else 'NEUTRAL')
+    synergy = "✅ STRONG" if voting_rec == ensemble_rec else "⚠  DIVERGENT"
+    print(f"   Voting Engine vs Ensemble: {synergy}  (VE={voting_rec}, Ens={ensemble_rec})")
+    
+    # Final decision: voter-first, ensemble-verified
+    fused = fuse_voter_and_ensemble(vote, boost_dir, boost_conf)
+    print(f"   Final Action: {fused['action']}")
+    print(f"   Fusion Score: {fused['score']:.2%}")
+    print(f"   Decision Rationale: {fused['reason']}")
+    print()
     
     # Create ensemble of classifiers
     print(f"\n🤖 Training Scikit-Learn Ensemble...")
