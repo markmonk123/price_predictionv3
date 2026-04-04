@@ -16,5 +16,27 @@
         "python"
     ],
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+    "python.testing.pytestEnabled": true,
+    "serverpulse.services": [
+        {
+            "name": "redis (docker)",
+            "type": "docker",
+            "port": 8000,
+            "useDocker": {
+                "pathToComposeFile": {
+                    "$mid": 1,
+                    "path": "/workspaces/price_predictionv3/docker-compose.yml",
+                    "scheme": "vscode-remote",
+                    "authority": "codespaces+ideal-lamp-7vvx79rjggrp2xpgx"
+                },
+                "selectedContainerName": "bitcoin-fix-redis-dev",
+                "serviceName": "redis"
+            },
+            "healthCheckPath": "/healthcheck",
+            "enableHealthCheck": true,
+            "healthCheckInterval": 10000
+        }
+    ],
+    "serverpulse.ai.optInShown": true,
+    "serverpulse.ai.enabled": true
 }
