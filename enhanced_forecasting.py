@@ -345,5 +345,92 @@ def run_enhanced_forecasting(df_combined):
     }
 
 
+def _fetch_btc_data(hours=72):
+    """Fetch recent BTC-USD 15-minute candles from Coinbase API. Falls back to synthetic data."""
+    try:
+        import requests
+        import time as _time
+        url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
+        granularity = 900  # 15-minute bars
+        points_per_request = 300
+        total_points = hours * 4  # 4 bars per hour
+        all_data = []
+        end_time = datetime.utcnow()
+
+        for _ in range(max(1, total_points // points_per_request)):
+            start_time = end_time - timedelta(seconds=granularity * points_per_request)
+            params = {
+                "granularity": granularity,
+                "start": start_time.isoformat(),
+                "end": end_time.isoformat(),
+            }
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            if not data:
+                break
+            all_data.extend(data)
+            end_time = datetime.fromtimestamp(data[-1][0])
+            _time.sleep(0.3)
+
+        if not all_data:
+            raise ValueError("No data received from API")
+
+        candles = pd.DataFrame(all_data, columns=["time", "low", "high", "open", "close", "volume"])
+        candles = candles.sort_values("time").drop_duplicates(subset=["time"])
+        candles["date"] = pd.to_datetime(candles["time"], unit="s", utc=True)
+        candles["price"] = pd.to_numeric(candles["close"], errors="coerce")
+        df = candles[["date", "price"]].dropna()
+        print(f"📡 Fetched {len(df)} BTC-USD 15-minute candles from Coinbase API")
+        return df
+
+    except Exception as e:
+        print(f"⚠️  API fetch failed ({e}). Using synthetic data for demonstration.")
+        periods = hours * 4
+        dates = pd.date_range(end=datetime.utcnow(), periods=periods, freq="15min", tz="UTC")
+        np.random.seed(42)
+        prices = np.cumsum(np.random.randn(periods) * 150) + 65000
+        prices = np.clip(prices, 1000, None)
+        return pd.DataFrame({"date": dates, "price": prices})
+
+
 if __name__ == "__main__":
-    pass
+    print("\n🚀 ENHANCED BITCOIN FORECASTING SYSTEM")
+    print("=" * 80)
+
+    df_input = _fetch_btc_data(hours=72)
+
+    results = run_enhanced_forecasting(df_input)
+
+    if results is None:
+        print("\n❌ Forecasting failed. Exiting.")
+    else:
+        forecast_12h = results["forecast_12h"]
+        stats = results["stats_12h"]
+
+        print("\n" + "=" * 80)
+        print("📊 12-HOUR PRICE FORECAST (15-minute intervals)")
+        print("=" * 80)
+        display_df = forecast_12h.copy()
+        display_df["timestamp"] = display_df["timestamp"].dt.strftime("%Y-%m-%d %H:%M UTC")
+        display_df["predicted_price"] = display_df["predicted_price"].map("${:,.2f}".format)
+        display_df["prediction_std"] = display_df["prediction_std"].map("±${:,.2f}".format)
+        print(display_df[["timestamp", "predicted_price", "prediction_std", "interval_minutes"]].to_string(index=False))
+
+        print("\n" + "=" * 80)
+        print("📈 FORECAST SUMMARY STATISTICS")
+        print("=" * 80)
+        current = stats["current_price"]
+        forecast_mean = stats["forecast_mean"]
+        change_pct = (forecast_mean - current) / current * 100
+
+        print(f"   💰 Current Price:        ${current:,.2f}")
+        print(f"   📊 Forecast Mean:        ${forecast_mean:,.2f}  ({change_pct:+.2f}%)")
+        print(f"   📉 Forecast Min:         ${stats['forecast_min']:,.2f}")
+        print(f"   📈 Forecast Max:         ${stats['forecast_max']:,.2f}")
+        print(f"   📐 Forecast Median:      ${stats['forecast_median']:,.2f}")
+        print(f"   📏 Forecast Std Dev:     ${stats['forecast_std']:,.2f}")
+        print(f"   🌊 Forecast Volatility:  {stats['forecast_volatility']:.4f}")
+        print(f"   🔀 Choppiness Index:     {stats['forecast_choppiness']:.2f}")
+        print(f"   ⏱️  Horizon:              {stats['horizon_hours']} hours")
+        print("=" * 80)
