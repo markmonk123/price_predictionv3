@@ -55,7 +55,7 @@ function Settings() {
   // Prediction settings
   const [predictionSettings, setPredictionSettings] = useState({
     interval: 60,
-    threshold: 0.002,
+    threshold: 0.0005,
     modelType: 'ensemble',
     featureCount: 50,
     enableBacktesting: true
@@ -307,7 +307,7 @@ function Settings() {
                       }));
                     }}
                     margin="normal"
-                    InputProps={{ inputProps: { min: 0.1, step: 0.1 } }}
+                    InputProps={{ inputProps: { min: 0.01, step: 0.01 } }}
                   />
                 </Grid>
                 <Grid item xs={12} sm={6}>

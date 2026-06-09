@@ -7,6 +7,7 @@ const { PythonShell } = require('python-shell');
 const fixService = require('./services/fixService');
 const predictionService = require('./services/predictionService');
 const { logMessage, logError } = require('./utils/logger');
+const { isDemoMode } = require('./utils/runtimeMode');
 
 // Environment variables
 require('dotenv').config();
@@ -76,6 +77,10 @@ if (process.env.NODE_ENV === 'production') {
 // Start the server
 server.listen(PORT, () => {
   logMessage(`Server running on port ${PORT}`);
+  logMessage(
+    `Runtime mode: ${isDemoMode ? 'DEMO' : 'LIVE'} ` +
+    `(NODE_ENV=${process.env.NODE_ENV || 'development'}, DEMO_MODE=${process.env.DEMO_MODE ?? 'default'})`
+  );
 });
 
 // Handle unexpected errors

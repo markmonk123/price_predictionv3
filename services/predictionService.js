@@ -8,6 +8,7 @@ const path = require('path');
 const NodeCache = require('node-cache');
 const fixService = require('./fixService');
 const { logMessage, logError } = require('../utils/logger');
+const { isDemoMode } = require('../utils/runtimeMode');
 
 // Cache for storing latest predictions
 const predictionCache = new NodeCache({ stdTTL: 300 }); // 5 minutes TTL
@@ -32,6 +33,9 @@ const runPredictionModel = async () => {
         '--time', new Date().toISOString()
       ]
     };
+    if (isDemoMode) {
+      options.args.push('--allow-synthetic');
+    }
 
     // Run Python prediction script
     return new Promise((resolve, reject) => {
@@ -46,6 +50,15 @@ const runPredictionModel = async () => {
         }
 
         const prediction = results[0];
+
+        if (prediction && prediction.error) {
+          return reject(new Error(`Python model error: ${prediction.error}`));
+        }
+
+        if (!isDemoMode && prediction && prediction.simulated) {
+          return reject(new Error('Prediction payload flagged as simulated while DEMO_MODE is disabled'));
+        }
+
         logMessage(`Prediction model result: ${JSON.stringify(prediction)}`);
 
         // Cache prediction result
@@ -60,7 +73,10 @@ const runPredictionModel = async () => {
     });
   } catch (error) {
     logError('Error in prediction model execution:', error);
-    return simulatePrediction();
+    if (isDemoMode) {
+      return simulatePrediction();
+    }
+    throw error;
   }
 };
 
@@ -74,8 +90,13 @@ const getLatestPrediction = async () => {
     return cachedPrediction;
   }
 
-  // If no cached prediction, generate a new one
-  return simulatePrediction();
+  if (isDemoMode) {
+    // If no cached prediction, generate a demo prediction.
+    return simulatePrediction();
+  }
+
+  // In non-demo mode, attempt a real model run instead of synthetic fallback.
+  return runPredictionModel();
 };
 
 /**
@@ -110,7 +131,7 @@ const simulatePrediction = async () => {
       no_change_probability: noChangeProbability,
       confidence: Math.max(increaseProbability, decreaseProbability, noChangeProbability),
       timeframe: '1 minute',
-      threshold: 0.002, // 0.2%
+      threshold: 0.0005, // 0.05%
       simulated: true // Flag to indicate this is simulated
     };
 
@@ -152,6 +173,10 @@ const schedulePredictions = (io) => {
  */
 const getHistoricalPredictions = async (timeframe = '1h') => {
   try {
+    if (!isDemoMode) {
+      throw new Error('Historical predictions are demo-only until a real persistence source is implemented');
+    }
+
     // In a real implementation, this would query a database
     // For demo purposes, we'll generate simulated historical data
 
@@ -190,7 +215,7 @@ const getHistoricalPredictions = async (timeframe = '1h') => {
         no_change_probability: noChangeProbability,
         confidence: Math.max(increaseProbability, decreaseProbability, noChangeProbability),
         timeframe: '1 minute',
-        threshold: 0.002,
+        threshold: 0.0005,
         simulated: true
       });
     }

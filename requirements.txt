@@ -3,3 +3,8 @@ pandas>=2.2,<3
 scikit-learn>=1.4,<2
 scipy>=1.12,<2
 requests>=2.31,<3
+
+# RAPIDS/cuML wheels
+--extra-index-url https://pypi.nvidia.com
+nvidia-cuda-runtime-cu12>=12; platform_system == "Linux"
+cuml-cu12==26.2.0; platform_system == "Linux"

@@ -419,7 +419,7 @@ function PredictionAnalysis({ predictionData, loading }) {
                       Threshold
                     </Typography>
                     <Typography variant="body2">
-                      ±{(predictionData.threshold * 100).toFixed(1)}%
+                      ±{(predictionData.threshold * 100).toFixed(2)}%
                     </Typography>
                   </Box>
 
@@ -684,7 +684,7 @@ function PredictionAnalysis({ predictionData, loading }) {
                         <TableCell>{(prediction.increase_probability * 100).toFixed(1)}%</TableCell>
                         <TableCell>{(prediction.decrease_probability * 100).toFixed(1)}%</TableCell>
                         <TableCell>{(prediction.no_change_probability * 100).toFixed(1)}%</TableCell>
-                        <TableCell>±{(prediction.threshold * 100).toFixed(1)}%</TableCell>
+                        <TableCell>±{(prediction.threshold * 100).toFixed(2)}%</TableCell>
                       </TableRow>
                     ))}
                     {!loadingHistory && historicalPredictions.length === 0 && (

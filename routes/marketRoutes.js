@@ -20,7 +20,7 @@ router.get('/data', async (req, res) => {
     res.json(marketData);
   } catch (error) {
     logError('Error getting market data:', error);
-    res.status(500).json({ error: 'Failed to fetch market data' });
+    res.status(503).json({ error: 'Live market data unavailable' });
   }
 });
 

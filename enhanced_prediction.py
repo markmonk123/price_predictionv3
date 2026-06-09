@@ -121,7 +121,11 @@ def display_forecast_windows(price_df, horizon_hours=12):
         print(f"\n📊 Forecast Summary:")
         print(f"   Current Price: ${forecast_stats['current_price']:.2f}")
         print(f"   Forecast Mean: ${forecast_stats['forecast_mean']:.2f}")
-        print(f"   Forecast Range: ${forecast_stats['forecast_min']:.2f} to ${forecast_stats['forecast_max']:.2f}")
+        print(f"   Predicted Range: ${forecast_stats['predicted_min']:.2f} to ${forecast_stats['predicted_max']:.2f}")
+        print(f"   Forecast Range (with current): ${forecast_stats['forecast_min']:.2f} to ${forecast_stats['forecast_max']:.2f}")
+        if bool(forecast_df.get('baseline_adjusted', pd.Series([False])).iloc[0]):
+            gap_pct = float(forecast_df.get('baseline_gap_pct', pd.Series([0.0])).iloc[0])
+            print(f"   Baseline Alignment: Enabled (raw first-step gap {gap_pct:+.2f}%)")
         print(f"   Forecast Volatility: {forecast_stats['forecast_volatility']:.4f}")
         print(f"   Forecast Choppiness: {forecast_stats['forecast_choppiness']:.2f}")
         return True
@@ -130,7 +134,7 @@ def display_forecast_windows(price_df, horizon_hours=12):
         print(f"\n⚠️ Failed to generate forecast windows: {e}")
         return False
 
-def create_enhanced_features(df, pct_threshold=0.002):
+def create_enhanced_features(df, pct_threshold=0.001):
     """Create comprehensive technical indicators for Bitcoin 1-minute interval prediction.
     Requires numpy, pandas, and scipy.stats. Raises ImportError if unavailable.
     """
@@ -964,7 +968,7 @@ def main():
     raw_df = fetch_bitcoin_data(num_points=36000, interval_minutes=1)
     print(f"📊 Fetched {len(raw_df)} data points of Bitcoin data at 1-minute intervals")
     
-    df = create_enhanced_features(raw_df, pct_threshold=0.002) # Adjusted threshold for smaller timeframe
+    df = create_enhanced_features(raw_df, pct_threshold=0.001) # 0.1% threshold tuning
     print(f"⚙️  Created {len(df.columns)-3} technical features")  # -3 for date, price, target
 
     # --- Rule-Based LONG Signal: DPO > 0 AND LR Slope > 0 AND DI+ > DI- AND ADX >= 25 AND MACD Hist > 0 ---
@@ -1148,9 +1152,9 @@ def main():
     # Class distribution
     class_dist = y.value_counts().sort_index()
     print(f"\n📈 Class Distribution:")
-    print(f"   Decrease ≥0.2%: {class_dist.get(-1, 0)} ({class_dist.get(-1, 0)/len(y)*100:.1f}%)")
+    print(f"   Decrease ≥0.1%: {class_dist.get(-1, 0)} ({class_dist.get(-1, 0)/len(y)*100:.1f}%)")
     print(f"   No Change: {class_dist.get(0, 0)} ({class_dist.get(0, 0)/len(y)*100:.1f}%)")
-    print(f"   Increase ≥0.2%: {class_dist.get(1, 0)} ({class_dist.get(1, 0)/len(y)*100:.1f}%)")
+    print(f"   Increase ≥0.1%: {class_dist.get(1, 0)} ({class_dist.get(1, 0)/len(y)*100:.1f}%)")
     
     # Time series split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
@@ -1235,7 +1239,7 @@ def main():
     
     print(f"\n📋 Classification Report:")
     print(classification_report(y_test, y_pred, 
-                              target_names=["Decrease ≥0.2%", "No Change", "Increase ≥0.2%"],
+                              target_names=["Decrease ≥0.1%", "No Change", "Increase ≥0.1%"],
                               labels=[-1, 0, 1], zero_division=0))
     
     # Feature importance from Random Forest

@@ -5,6 +5,7 @@
 const express = require('express');
 const predictionService = require('../services/predictionService');
 const { logError } = require('../utils/logger');
+const { isDemoMode } = require('../utils/runtimeMode');
 
 const router = express.Router();
 
@@ -30,6 +31,12 @@ router.get('/latest', async (req, res) => {
  */
 router.get('/history', async (req, res) => {
   try {
+    if (!isDemoMode) {
+      return res.status(501).json({
+        error: 'Historical predictions are not available outside demo mode'
+      });
+    }
+
     const { timeframe = '1h' } = req.query;
     const predictions = await predictionService.getHistoricalPredictions(timeframe);
     res.json(predictions);

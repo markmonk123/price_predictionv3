@@ -18,6 +18,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 try:
     import numpy as np
     import pandas as pd
+    import requests
     from enhanced_prediction import create_enhanced_features, main
     from sklearn.ensemble import RandomForestClassifier
 except ImportError as e:
@@ -30,7 +31,51 @@ def parse_arguments():
     parser.add_argument('--volume', type=float, required=False, default=100.0, help='Current trading volume')
     parser.add_argument('--time', type=str, required=False, default=None, help='Current timestamp (ISO format)')
     parser.add_argument('--window', type=int, required=False, default=60, help='Historical data window size')
+    parser.add_argument('--allow-synthetic', action='store_true',
+                        help='Allow synthetic fallback if live market history fetch fails')
     return parser.parse_args()
+
+
+def fetch_recent_market_data(current_price, volume, timestamp, window_size=60):
+    """
+    Fetch recent 1-minute BTC-USD candles from Coinbase.
+    """
+    if timestamp is None:
+        timestamp = datetime.datetime.utcnow()
+    elif isinstance(timestamp, str):
+        timestamp = parse(timestamp)
+
+    # Coinbase candle endpoint returns [time, low, high, open, close, volume]
+    url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
+    start_time = timestamp - datetime.timedelta(minutes=max(window_size + 5, 65))
+    params = {
+        "granularity": 60,
+        "start": start_time.isoformat(),
+        "end": timestamp.isoformat()
+    }
+
+    response = requests.get(url, params=params, timeout=10)
+    response.raise_for_status()
+    candles = response.json()
+
+    if not candles:
+        raise ValueError("No candles returned from Coinbase API")
+
+    candles = sorted(candles, key=lambda x: x[0])[-window_size:]
+    if len(candles) < max(10, window_size // 3):
+        raise ValueError(f"Insufficient candle history returned ({len(candles)} rows)")
+
+    df = pd.DataFrame({
+        "date": [datetime.datetime.utcfromtimestamp(c[0]) for c in candles],
+        "price": [float(c[4]) for c in candles],   # close
+        "volume": [float(c[5]) for c in candles]
+    })
+
+    # Use latest values from the upstream market-data source for consistency.
+    df.loc[df.index[-1], "price"] = float(current_price)
+    df.loc[df.index[-1], "volume"] = float(volume)
+
+    return df
 
 def generate_synthetic_data(current_price, volume, timestamp, window_size=60):
     """
@@ -69,16 +114,23 @@ def generate_synthetic_data(current_price, volume, timestamp, window_size=60):
 
     return df
 
-def run_prediction(price, volume, timestamp=None, window_size=60):
+def run_prediction(price, volume, timestamp=None, window_size=60, allow_synthetic=False):
     """
     Run the Bitcoin prediction model and return results
     """
     try:
-        # Generate synthetic historical data based on current price
-        df = generate_synthetic_data(price, volume, timestamp, window_size)
+        data_source = "live"
+        try:
+            df = fetch_recent_market_data(price, volume, timestamp, window_size)
+        except Exception:
+            if not allow_synthetic:
+                raise
+            # Explicit demo fallback
+            df = generate_synthetic_data(price, volume, timestamp, window_size)
+            data_source = "synthetic"
 
         # Create enhanced features
-        enhanced_df = create_enhanced_features(df, pct_threshold=0.002)
+        enhanced_df = create_enhanced_features(df, pct_threshold=0.001)
 
         # Select features (excluding target variables and non-predictive columns)
         feature_cols = [col for col in enhanced_df.columns 
@@ -124,7 +176,9 @@ def run_prediction(price, volume, timestamp=None, window_size=60):
             "no_change_probability": float(no_change_prob),
             "confidence": float(max(increase_prob, decrease_prob, no_change_prob)),
             "timeframe": "1 minute",
-            "threshold": 0.002
+            "threshold": 0.001,
+            "simulated": data_source == "synthetic",
+            "data_source": data_source
         }
 
         return result
@@ -140,7 +194,8 @@ if __name__ == "__main__":
         price=args.price,
         volume=args.volume,
         timestamp=timestamp,
-        window_size=args.window
+        window_size=args.window,
+        allow_synthetic=args.allow_synthetic
     )
 
     # Output as JSON

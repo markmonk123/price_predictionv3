@@ -398,7 +398,7 @@ function Dashboard({ marketData, predictionData, loading, error }) {
                       Price Threshold
                     </Typography>
                     <Typography variant="body2">
-                      ±{(predictionData.threshold * 100).toFixed(1)}%
+                      ±{(predictionData.threshold * 100).toFixed(2)}%
                     </Typography>
                   </Box>
 

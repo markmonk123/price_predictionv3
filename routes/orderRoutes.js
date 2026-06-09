@@ -5,6 +5,7 @@
 const express = require('express');
 const fixService = require('../services/fixService');
 const { logError, logMessage } = require('../utils/logger');
+const { isDemoMode } = require('../utils/runtimeMode');
 
 const router = express.Router();
 
@@ -52,6 +53,10 @@ router.post('/', async (req, res) => {
  */
 router.get('/:orderId', async (req, res) => {
   try {
+    if (!isDemoMode) {
+      return res.status(501).json({ error: 'Order status endpoint is not implemented outside demo mode' });
+    }
+
     const { orderId } = req.params;
 
     // In a real implementation, this would query order status
@@ -79,6 +84,10 @@ router.get('/:orderId', async (req, res) => {
  */
 router.get('/', async (req, res) => {
   try {
+    if (!isDemoMode) {
+      return res.status(501).json({ error: 'Order history endpoint is not implemented outside demo mode' });
+    }
+
     // In a real implementation, this would query order history
     // For demo purposes, return simulated orders
     const simulatedOrders = [];
@@ -112,6 +121,10 @@ router.get('/', async (req, res) => {
  */
 router.delete('/:orderId', async (req, res) => {
   try {
+    if (!isDemoMode) {
+      return res.status(501).json({ error: 'Order cancel endpoint is not implemented outside demo mode' });
+    }
+
     const { orderId } = req.params;
 
     // In a real implementation, this would send a cancel request via FIX

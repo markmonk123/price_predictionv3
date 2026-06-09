@@ -5,6 +5,7 @@
 const express = require('express');
 const fixService = require('../services/fixService');
 const { logError } = require('../utils/logger');
+const { isDemoMode } = require('../utils/runtimeMode');
 
 const router = express.Router();
 
@@ -15,6 +16,10 @@ const router = express.Router();
  */
 router.get('/status', async (req, res) => {
   try {
+    if (!isDemoMode) {
+      return res.status(501).json({ error: 'FIX status endpoint is not implemented outside demo mode' });
+    }
+
     // In a real implementation, this would check actual connection status
     // For demo purposes, simulate status
     res.json({

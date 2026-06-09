@@ -47,6 +47,13 @@ A comprehensive Bitcoin price prediction system featuring 24-hour, 12-hour, and 
 
 ## 🏃 Quick Start
 
+### Runtime Mode (Demo vs Live)
+This project now uses an explicit runtime switch for simulated data paths:
+
+- `DEMO_MODE=true`: Allows simulated/synthetic data fallbacks for demos.
+- `DEMO_MODE=false`: Disables simulated/synthetic API fallbacks.
+- Production default is fail-closed: if `NODE_ENV=production` and `DEMO_MODE` is not set, simulation is disabled.
+
 ### Run the Enhanced System
 ```bash
 python3 demo.py

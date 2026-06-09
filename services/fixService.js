@@ -6,6 +6,7 @@
 const QuickFIX = require('quick-fix');
 const NodeCache = require('node-cache');
 const { logMessage, logError } = require('../utils/logger');
+const { isDemoMode } = require('../utils/runtimeMode');
 
 // Cache for storing latest market data
 const marketDataCache = new NodeCache({ stdTTL: 300 }); // 5 minutes TTL
@@ -295,8 +296,12 @@ const getMarketData = async (symbol = 'BTC/USD') => {
     return cachedData;
   }
 
-  // If no cached data, simulate market data for demo purposes
-  return simulateMarketData(symbol);
+  if (isDemoMode) {
+    // If no cached data, simulate market data in demo mode only.
+    return simulateMarketData(symbol);
+  }
+
+  throw new Error(`No live market data available for ${symbol} and DEMO_MODE is disabled`);
 };
 
 /**

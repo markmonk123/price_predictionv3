@@ -279,6 +279,21 @@ class EnhancedBitcoinForecaster:
 
         ensemble_avg = np.mean(ensemble_predictions, axis=0)
         ensemble_std = np.std(ensemble_predictions, axis=0) if len(ensemble_predictions) > 1 else np.zeros(steps)
+        current_price = float(pd.to_numeric(df_feat['price'], errors='coerce').dropna().iloc[-1])
+        raw_first_prediction = float(ensemble_avg[0]) if len(ensemble_avg) > 0 else current_price
+        baseline_gap_pct = 0.0
+        baseline_adjusted = False
+        baseline_scale = 1.0
+
+        # Re-anchor forecast levels when the first-step prediction drifts too far from the latest price.
+        if current_price > 0 and np.isfinite(raw_first_prediction) and raw_first_prediction > 0:
+            baseline_gap_pct = ((raw_first_prediction - current_price) / current_price) * 100.0
+            if abs(baseline_gap_pct) > 2.0:
+                baseline_scale = current_price / raw_first_prediction
+                ensemble_avg = ensemble_avg * baseline_scale
+                ensemble_std = ensemble_std * abs(baseline_scale)
+                baseline_adjusted = True
+                print(f"   Applied baseline alignment ({baseline_gap_pct:+.2f}% first-step gap)")
 
         start_time = pd.to_datetime(df_feat['date'].iloc[-1], utc=True) + timedelta(minutes=15)
         timestamps = [start_time + timedelta(minutes=15 * i) for i in range(steps)]
@@ -287,7 +302,10 @@ class EnhancedBitcoinForecaster:
             'timestamp': timestamps,
             'predicted_price': ensemble_avg,
             'prediction_std': ensemble_std,
-            'interval_minutes': [15 * (i + 1) for i in range(steps)]
+            'interval_minutes': [15 * (i + 1) for i in range(steps)],
+            'baseline_adjusted': baseline_adjusted,
+            'baseline_gap_pct': baseline_gap_pct,
+            'baseline_scale': baseline_scale
         })
         return forecast_df
 
@@ -297,16 +315,23 @@ class EnhancedBitcoinForecaster:
         returns = prices.pct_change().fillna(0.0)
 
         mean_price = float(prices.mean())
+        predicted_min = float(prices.min())
+        predicted_max = float(prices.max())
+        inclusive_min = float(min(predicted_min, current_price))
+        inclusive_max = float(max(predicted_max, current_price))
         stats = {
             'current_price': float(current_price),
             'horizon_hours': int(horizon_hours),
-            'forecast_min': float(prices.min()),
-            'forecast_max': float(prices.max()),
+            'forecast_min': inclusive_min,
+            'forecast_max': inclusive_max,
+            'predicted_min': predicted_min,
+            'predicted_max': predicted_max,
             'forecast_mean': mean_price,
             'forecast_median': float(prices.median()),
             'forecast_average': mean_price,
             'forecast_volatility': float(returns.std()),
-            'forecast_std': float(prices.std())
+            'forecast_std': float(prices.std()),
+            'forecast_range_includes_current': bool(inclusive_min <= float(current_price) <= inclusive_max)
         }
 
         tr = prices.diff().abs().fillna(0.0)
@@ -426,8 +451,9 @@ if __name__ == "__main__":
 
         print(f"   💰 Current Price:        ${current:,.2f}")
         print(f"   📊 Forecast Mean:        ${forecast_mean:,.2f}  ({change_pct:+.2f}%)")
-        print(f"   📉 Forecast Min:         ${stats['forecast_min']:,.2f}")
-        print(f"   📈 Forecast Max:         ${stats['forecast_max']:,.2f}")
+        print(f"   📉 Predicted Min:        ${stats['predicted_min']:,.2f}")
+        print(f"   📈 Predicted Max:        ${stats['predicted_max']:,.2f}")
+        print(f"   📍 Range w/ Current:     ${stats['forecast_min']:,.2f} to ${stats['forecast_max']:,.2f}")
         print(f"   📐 Forecast Median:      ${stats['forecast_median']:,.2f}")
         print(f"   📏 Forecast Std Dev:     ${stats['forecast_std']:,.2f}")
         print(f"   🌊 Forecast Volatility:  {stats['forecast_volatility']:.4f}")
