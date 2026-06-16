@@ -8,20 +8,24 @@ try:
 except Exception:
     pd = None
 try:
-    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
-    from sklearn.model_selection import train_test_split, cross_val_score
+    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier, ExtraTreesClassifier
+    from sklearn.model_selection import train_test_split, cross_val_score, TimeSeriesSplit
+    from sklearn.calibration import CalibratedClassifierCV
     from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
     from sklearn.linear_model import LogisticRegression
     from sklearn.svm import SVC
     from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, QuantileTransformer
     from sklearn.pipeline import Pipeline
+    from sklearn.base import clone
 except Exception:
-    RandomForestClassifier = GradientBoostingClassifier = VotingClassifier = None
-    train_test_split = cross_val_score = None
+    RandomForestClassifier = GradientBoostingClassifier = VotingClassifier = ExtraTreesClassifier = None
+    train_test_split = cross_val_score = TimeSeriesSplit = None
+    CalibratedClassifierCV = None
     classification_report = confusion_matrix = accuracy_score = None
     LogisticRegression = SVC = None
     StandardScaler = MinMaxScaler = RobustScaler = PowerTransformer = QuantileTransformer = None
     Pipeline = None
+    clone = None
 
 # ---------------------------------------------------------------------------
 # CUDA / cuML acceleration — auto-detected on WSL with an NVIDIA GPU.
@@ -70,6 +74,72 @@ from zoneinfo import ZoneInfo
 import time
 
 DISPLAY_TZ = ZoneInfo("America/New_York")
+
+
+def make_time_series_split(n_samples, desired_splits=5):
+    """Build a valid walk-forward splitter for time-ordered model validation."""
+    if n_samples < 3:
+        raise ValueError("At least 3 samples are required for time-series cross-validation.")
+    n_splits = min(desired_splits, n_samples - 1)
+    n_splits = max(2, n_splits)
+    return TimeSeriesSplit(n_splits=n_splits)
+
+
+def walk_forward_scores(estimator, X, y, desired_splits=5, scoring='accuracy'):
+    splitter = make_time_series_split(len(X), desired_splits=desired_splits)
+    return cross_val_score(estimator, X, y, cv=splitter, scoring=scoring)
+
+
+def fit_calibrated_classifier(estimator, X_train, y_train, desired_splits=3):
+    """Fit calibrated probabilities, falling back to the raw model when folds are sparse."""
+    if len(np.unique(y_train)) < 2:
+        estimator.fit(X_train, y_train)
+        return estimator
+
+    cv = make_time_series_split(len(X_train), desired_splits=desired_splits)
+    try:
+        calibrated = CalibratedClassifierCV(estimator=clone(estimator), method='sigmoid', cv=cv)
+    except TypeError:
+        calibrated = CalibratedClassifierCV(base_estimator=clone(estimator), method='sigmoid', cv=cv)
+
+    try:
+        calibrated.fit(X_train, y_train)
+        return calibrated
+    except Exception as exc:
+        print(f"   ⚠  Calibration skipped: {exc}")
+        estimator.fit(X_train, y_train)
+        return estimator
+
+
+def print_baseline_report(y_train, y_test):
+    majority_class = y_train.value_counts().idxmax()
+    baseline_pred = np.full(len(y_test), majority_class)
+    baseline_accuracy = accuracy_score(y_test, baseline_pred)
+    print(f"   Baseline majority-class accuracy: {baseline_accuracy:.3f} (class {majority_class:+.0f})")
+    return baseline_accuracy
+
+
+def print_confidence_report(y_true, y_pred, confidence):
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    confidence = np.asarray(confidence)
+
+    print("\n🎚️  Confidence Calibration Check:")
+    for low, high in [(0.0, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 1.01)]:
+        mask = (confidence >= low) & (confidence < high)
+        if mask.sum() == 0:
+            continue
+        bucket_accuracy = accuracy_score(y_true[mask], y_pred[mask])
+        coverage = mask.mean()
+        label = f"{low:.0%}-{min(high, 1.0):.0%}"
+        print(f"   {label:<8} | Accuracy: {bucket_accuracy:.3f} | Coverage: {coverage:.1%} ({mask.sum()} samples)")
+
+    high_conf_mask = confidence >= 0.70
+    if high_conf_mask.any():
+        high_conf_accuracy = accuracy_score(y_true[high_conf_mask], y_pred[high_conf_mask])
+        print(f"   High-confidence gate >=70%: {high_conf_accuracy:.3f} accuracy on {high_conf_mask.mean():.1%} of test rows")
+    else:
+        print("   High-confidence gate >=70%: no qualifying test rows")
 
 
 def format_display_time(timestamp):
@@ -134,7 +204,7 @@ def display_forecast_windows(price_df, horizon_hours=12):
         print(f"\n⚠️ Failed to generate forecast windows: {e}")
         return False
 
-def create_enhanced_features(df, pct_threshold=0.001):
+def create_enhanced_features(df, pct_threshold=0.001, horizon_steps=1):
     """Create comprehensive technical indicators for Bitcoin 1-minute interval prediction.
     Requires numpy, pandas, and scipy.stats. Raises ImportError if unavailable.
     """
@@ -258,23 +328,92 @@ def create_enhanced_features(df, pct_threshold=0.001):
     dx = 100 * (df['di_plus'] - df['di_minus']).abs() / (df['di_plus'] + df['di_minus'] + 1e-8)
     df['adx'] = dx.ewm(alpha=1 / adx_period, adjust=False).mean()
 
-    # Classification target
-    df['future_price'] = df['price'].shift(-1)
+    # Classification target. Keep rows without a known future price out of training.
+    df['future_price'] = df['price'].shift(-horizon_steps)
     df['next_return'] = (df['future_price'] - df['price']) / (df['price'] + 1e-8)
-    df['target'] = 0
-    df.loc[df['next_return'] >= pct_threshold, 'target'] = 1
-    df.loc[df['next_return'] <= -pct_threshold, 'target'] = -1
+    df['target'] = np.nan
+    valid_future = df['future_price'].notna()
+    df.loc[valid_future, 'target'] = 0
+    df.loc[valid_future & (df['next_return'] >= pct_threshold), 'target'] = 1
+    df.loc[valid_future & (df['next_return'] <= -pct_threshold), 'target'] = -1
     
     # Replace inf and nan values
     df = df.replace([np.inf, -np.inf], np.nan)
     df['next_return'] = (df['future_price'] - df['price']) / df['price']
-    df['target'] = 0
-    df.loc[df['next_return'] >= pct_threshold, 'target'] = 1
-    df.loc[df['next_return'] <= -pct_threshold, 'target'] = -1
     
     return df.dropna()
 
-def fetch_bitcoin_data(num_points=36000, interval_minutes=1):
+
+def evaluate_threshold_horizon_grid(raw_df, thresholds=None, horizons=None):
+    """Search label definitions with walk-forward CV on pre-holdout data only."""
+    thresholds = thresholds or [0.001, 0.0015, 0.002, 0.003]
+    horizons = horizons or [1, 5, 15, 30, 60]
+    search_cutoff = max(int(len(raw_df) * 0.8), 1)
+    search_df = raw_df.iloc[:search_cutoff].copy()
+    results = []
+
+    print("\n🧪 Label Search: threshold × horizon walk-forward CV")
+    for horizon in horizons:
+        for threshold in thresholds:
+            try:
+                candidate = create_enhanced_features(search_df, pct_threshold=threshold, horizon_steps=horizon)
+                feature_cols = [
+                    col for col in candidate.columns
+                    if col not in ['date', 'price', 'high', 'low', 'future_price', 'next_return', 'target', 'signal', 'bb_pct', 'macd', 'macd_signal']
+                ]
+                X_candidate = candidate[feature_cols]
+                y_candidate = candidate['target'].astype(int)
+
+                if len(y_candidate) < 200 or y_candidate.nunique() < 2:
+                    continue
+
+                search_model = RandomForestClassifier(
+                    n_estimators=60,
+                    max_depth=10,
+                    min_samples_split=8,
+                    min_samples_leaf=3,
+                    class_weight='balanced_subsample',
+                    random_state=42,
+                    n_jobs=-1
+                )
+                scores = walk_forward_scores(search_model, X_candidate, y_candidate, desired_splits=3, scoring='accuracy')
+                class_balance = y_candidate.value_counts(normalize=True).to_dict()
+                majority_baseline = float(max(class_balance.values()))
+                results.append({
+                    'threshold': threshold,
+                    'horizon': horizon,
+                    'cv_mean': float(scores.mean()),
+                    'cv_spread': float(scores.std() * 2),
+                    'baseline': majority_baseline,
+                    'edge': float(scores.mean() - majority_baseline),
+                    'samples': len(y_candidate),
+                    'class_balance': class_balance
+                })
+            except Exception as exc:
+                print(f"   ⚠  skipped threshold={threshold:.4f}, horizon={horizon}m: {exc}")
+
+    if not results:
+        print("   ⚠  Label search produced no valid candidates; using default threshold=0.001, horizon=1m")
+        return {'threshold': 0.001, 'horizon': 1, 'cv_mean': 0.0, 'cv_spread': 0.0}
+
+    results.sort(key=lambda row: (row['edge'], row['cv_mean'], -row['cv_spread']), reverse=True)
+    for i, row in enumerate(results[:5], 1):
+        print(
+            f"   {i}. threshold={row['threshold']:.4f}, horizon={row['horizon']:>2}m | "
+            f"CV={row['cv_mean']:.3f} (±{row['cv_spread']:.3f}) | "
+            f"baseline={row['baseline']:.3f} | edge={row['edge']:+.3f} | samples={row['samples']}"
+        )
+
+    stable = [row for row in results if row['cv_spread'] <= 0.20]
+    best = stable[0] if stable else results[0]
+    print(
+        f"   Selected label: threshold={best['threshold']:.4f}, "
+        f"horizon={best['horizon']}m, CV={best['cv_mean']:.3f} (±{best['cv_spread']:.3f}), "
+        f"baseline={best.get('baseline', 0.0):.3f}, edge={best.get('edge', 0.0):+.3f}"
+    )
+    return best
+
+def fetch_bitcoin_data(num_points=24000, interval_minutes=1):
     """Fetch a specific number of Bitcoin price data points from Coinbase API.
     Fails hard on any error or if 'requests' is unavailable.
     Requires pandas and numpy when returning data.
@@ -774,29 +913,24 @@ class ScalerEvaluator:
         Returns:
             list: [(scaler_name, avg_cv_score, scaler_object), ...] sorted descending by score
         """
-        from sklearn.model_selection import cross_val_score
-        
         results = []
-        # _gpu_scalers() returns cuML implementations when CUDA is available
-        scalers = _gpu_scalers()
-        for name, scaler in scalers.items():
+        splitter = make_time_series_split(len(X_train), desired_splits=cv)
+
+        # Use sklearn pipelines for evaluation so scaling is fitted inside each CV fold.
+        scaler_names = ['StandardScaler', 'MinMaxScaler', 'RobustScaler', 'PowerTransformer', 'QuantileTransformer']
+        for name in scaler_names:
             try:
-                X_scaled = scaler.fit_transform(X_train)
-                rf = _gpu_rf(n_estimators=50, max_depth=10, random_state=42, n_jobs=-1)
-                scores = cross_val_score(rf, X_scaled, y_train, cv=cv, scoring='accuracy')
+                scaler = _cpu_scaler_by_name(name)
+                rf = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42, n_jobs=-1)
+                candidate = Pipeline([
+                    ('scaler', scaler),
+                    ('rf', rf)
+                ])
+                scores = cross_val_score(candidate, X_train, y_train, cv=splitter, scoring='accuracy')
                 avg_score = scores.mean()
-                results.append((name, avg_score, scaler))
+                results.append((name, avg_score, _cpu_scaler_by_name(name)))
             except Exception as e:
-                print(f"    ⚠  {name} GPU-path eval failed: {e}. Retrying on CPU scaler.")
-                try:
-                    cpu_scaler = _cpu_scaler_by_name(name)
-                    X_scaled_cpu = cpu_scaler.fit_transform(X_train)
-                    rf_cpu = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42, n_jobs=-1)
-                    scores_cpu = cross_val_score(rf_cpu, X_scaled_cpu, y_train, cv=cv, scoring='accuracy')
-                    avg_score_cpu = scores_cpu.mean()
-                    results.append((name, avg_score_cpu, cpu_scaler))
-                except Exception as e_cpu:
-                    print(f"    ⚠  {name} CPU fallback eval failed: {e_cpu}")
+                print(f"    ⚠  {name} scaler eval failed: {e}")
         
         results.sort(key=lambda x: x[1], reverse=True)
         return results
@@ -818,6 +952,7 @@ class EnsembleConfidenceBooster:
             y_train: training labels
         """
         self.models = {}
+        self.feature_columns = list(X_train.columns) if hasattr(X_train, 'columns') else None
         
         for scaler_name, _, scaler in scalers_list[:3]:
             try:
@@ -862,6 +997,20 @@ class EnsembleConfidenceBooster:
                 )
             lr.fit(X_scaled, y_train)
             self.models[scaler_name]['lr'] = (lr, scaler)
+
+    def _as_feature_frame(self, X_test_latest):
+        """Return one prediction row with the same feature names used during scaler fit."""
+        if self.feature_columns is None:
+            return X_test_latest.reshape(1, -1) if hasattr(X_test_latest, 'reshape') else np.asarray(X_test_latest).reshape(1, -1)
+
+        if hasattr(X_test_latest, 'columns'):
+            return X_test_latest.reindex(columns=self.feature_columns)
+
+        if hasattr(X_test_latest, 'to_frame'):
+            return X_test_latest.to_frame().T.reindex(columns=self.feature_columns)
+
+        values = np.asarray(X_test_latest).reshape(1, -1)
+        return pd.DataFrame(values, columns=self.feature_columns)
     
     def predict_with_boost(self, X_test_latest):
         """Predict on single row, returning (direction, boosted_confidence).
@@ -872,7 +1021,7 @@ class EnsembleConfidenceBooster:
         Returns:
             (direction, boosted_confidence, breakdown_str)
         """
-        X_row = X_test_latest.values.reshape(1, -1) if hasattr(X_test_latest, 'values') else X_test_latest.reshape(1, -1)
+        X_row = self._as_feature_frame(X_test_latest)
         
         votes = []
         confidences = []
@@ -965,11 +1114,17 @@ def main():
         print("🧰 Backend: CPU fallback active (CUDA/cuML unavailable)")
     
     # Get data and create features
-    raw_df = fetch_bitcoin_data(num_points=36000, interval_minutes=1)
+    raw_df = fetch_bitcoin_data(num_points=24000, interval_minutes=1)
     print(f"📊 Fetched {len(raw_df)} data points of Bitcoin data at 1-minute intervals")
     
-    df = create_enhanced_features(raw_df, pct_threshold=0.001) # 0.1% threshold tuning
+    best_label = evaluate_threshold_horizon_grid(raw_df)
+    selected_threshold = best_label['threshold']
+    selected_horizon = best_label['horizon']
+    move_label = f"{selected_threshold * 100:.2f}%"
+
+    df = create_enhanced_features(raw_df, pct_threshold=selected_threshold, horizon_steps=selected_horizon)
     print(f"⚙️  Created {len(df.columns)-3} technical features")  # -3 for date, price, target
+    print(f"🎯 Training label: next {selected_horizon} minute(s), move threshold ±{move_label}")
 
     # --- Rule-Based LONG Signal: DPO > 0 AND LR Slope > 0 AND DI+ > DI- AND ADX >= 25 AND MACD Hist > 0 ---
     print("\n📡 Rule-Based LONG Signal (DPO > 0 AND LR Slope > 0 AND DI+ > DI- AND ADX ≥ 25 AND MACD Hist > 0):")    
@@ -1145,19 +1300,20 @@ def main():
     # Select features (exclude non-predictive columns)
     feature_cols = [col for col in df.columns if col not in ['date', 'price', 'high', 'low', 'future_price', 'next_return', 'target', 'signal', 'bb_pct', 'macd', 'macd_signal']]
     X = df[feature_cols]
-    y = df['target']
+    y = df['target'].astype(int)
     
     print(f"\n🎯 Using {len(feature_cols)} features for prediction")
     
     # Class distribution
     class_dist = y.value_counts().sort_index()
     print(f"\n📈 Class Distribution:")
-    print(f"   Decrease ≥0.1%: {class_dist.get(-1, 0)} ({class_dist.get(-1, 0)/len(y)*100:.1f}%)")
+    print(f"   Decrease ≥{move_label}: {class_dist.get(-1, 0)} ({class_dist.get(-1, 0)/len(y)*100:.1f}%)")
     print(f"   No Change: {class_dist.get(0, 0)} ({class_dist.get(0, 0)/len(y)*100:.1f}%)")
-    print(f"   Increase ≥0.1%: {class_dist.get(1, 0)} ({class_dist.get(1, 0)/len(y)*100:.1f}%)")
+    print(f"   Increase ≥{move_label}: {class_dist.get(1, 0)} ({class_dist.get(1, 0)/len(y)*100:.1f}%)")
     
     # Time series split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+    print_baseline_report(y_train, y_test)
     
     # --- Scaler Evaluation & Multi-Scaler Ensemble Confidence Booster ---
     print("\n🔍 Evaluating 5 scalers for optimal feature preprocessing...")
@@ -1215,17 +1371,28 @@ def main():
         ('scaler', StandardScaler()),
         ('svm', SVC(kernel='rbf', class_weight='balanced', probability=True, random_state=42))
     ])
+
+    # Extra Trees adds a more randomized tree ensemble that can reduce RF correlation.
+    et = ExtraTreesClassifier(
+        n_estimators=200, max_depth=14, min_samples_split=5,
+        class_weight='balanced', random_state=42, n_jobs=-1
+    )
     
     # Ensemble voting classifier
     ensemble = VotingClassifier([
         ('rf', rf),
         ('gb', gb), 
         ('lr', lr_pipe),
-        ('svm', svm_pipe)
+        ('svm', svm_pipe),
+        ('et', et)
     ], voting='soft')
     
-    # Train ensemble
-    ensemble.fit(X_train, y_train)
+    cv_scores = walk_forward_scores(clone(ensemble), X_train, y_train, desired_splits=5, scoring='accuracy')
+    print(f"\n🔄 Walk-Forward Cross-Validation:")
+    print(f"   Mean CV Accuracy: {cv_scores.mean():.3f} (±{cv_scores.std()*2:.3f})")
+
+    # Train calibrated ensemble
+    ensemble = fit_calibrated_classifier(ensemble, X_train, y_train, desired_splits=3)
     
     # Predictions
     y_pred = ensemble.predict(X_test)
@@ -1239,8 +1406,9 @@ def main():
     
     print(f"\n📋 Classification Report:")
     print(classification_report(y_test, y_pred, 
-                              target_names=["Decrease ≥0.1%", "No Change", "Increase ≥0.1%"],
+                              target_names=[f"Decrease ≥{move_label}", "No Change", f"Increase ≥{move_label}"],
                               labels=[-1, 0, 1], zero_division=0))
+    print_confidence_report(y_test, y_pred, confidence)
     
     # Feature importance from Random Forest
     rf.fit(X_train, y_train)
@@ -1296,14 +1464,9 @@ def main():
         print(f"   Timestamp: {format_display_time(row['date'])}")
         print(f"   Expected Return: {(row['future_price'] - row['price']) / row['price'] * 100:.2f}%")
 
-    # Cross-validation
-    cv_scores = cross_val_score(ensemble, X_train, y_train, cv=5, scoring='accuracy')
-    print(f"\n🔄 Cross-Validation:")
-    print(f"   Mean CV Accuracy: {cv_scores.mean():.3f} (±{cv_scores.std()*2:.3f})")
-    
     print(f"\n✅ Analysis Complete!")
     print(f"   📊 Dataset: {len(X_train)} train + {len(X_test)} test samples")
-    print(f"   🤖 Ensemble: 4 algorithms (RF, GB, LR, SVM)")
+    print(f"   🤖 Ensemble: 5 algorithms (RF, GB, LR, SVM, ExtraTrees)")
     print(f"   📈 Features: {len(feature_cols)} technical indicators")
 
 if __name__ == "__main__":

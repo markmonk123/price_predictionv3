@@ -370,19 +370,23 @@ def run_enhanced_forecasting(df_combined):
     }
 
 
-def _fetch_btc_data(hours=72):
+def _fetch_btc_data(hours=72, samples=None):
     """Fetch recent BTC-USD 15-minute candles from Coinbase API. Falls back to synthetic data."""
+    total_points = int(samples if samples is not None else hours * 4)
+    if total_points <= 0:
+        raise ValueError("Data sample count must be positive")
+
     try:
         import requests
         import time as _time
         url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
         granularity = 900  # 15-minute bars
         points_per_request = 300
-        total_points = hours * 4  # 4 bars per hour
         all_data = []
         end_time = datetime.utcnow()
 
-        for _ in range(max(1, total_points // points_per_request)):
+        request_count = max(1, -(-total_points // points_per_request))
+        for _ in range(request_count):
             start_time = end_time - timedelta(seconds=granularity * points_per_request)
             params = {
                 "granularity": granularity,
@@ -405,13 +409,13 @@ def _fetch_btc_data(hours=72):
         candles = candles.sort_values("time").drop_duplicates(subset=["time"])
         candles["date"] = pd.to_datetime(candles["time"], unit="s", utc=True)
         candles["price"] = pd.to_numeric(candles["close"], errors="coerce")
-        df = candles[["date", "price"]].dropna()
+        df = candles[["date", "price"]].dropna().tail(total_points)
         print(f"📡 Fetched {len(df)} BTC-USD 15-minute candles from Coinbase API")
         return df
 
     except Exception as e:
         print(f"⚠️  API fetch failed ({e}). Using synthetic data for demonstration.")
-        periods = hours * 4
+        periods = total_points
         dates = pd.date_range(end=datetime.utcnow(), periods=periods, freq="15min", tz="UTC")
         np.random.seed(42)
         prices = np.cumsum(np.random.randn(periods) * 150) + 65000
@@ -423,7 +427,8 @@ if __name__ == "__main__":
     print("\n🚀 ENHANCED BITCOIN FORECASTING SYSTEM")
     print("=" * 80)
 
-    df_input = _fetch_btc_data(hours=72)
+    data_samples = 12000
+    df_input = _fetch_btc_data(samples=data_samples)
 
     results = run_enhanced_forecasting(df_input)
 

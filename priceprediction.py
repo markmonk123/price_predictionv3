@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier, ExtraTreesClassifier
 from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, TimeSeriesSplit
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import mean_squared_error, classification_report, confusion_matrix, accuracy_score, precision_recall_fscore_support
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
@@ -10,6 +11,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.pipeline import Pipeline
 from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.base import clone
 from scipy import stats
 import matplotlib.pyplot as plt
 import requests
@@ -18,6 +20,83 @@ import json
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
+
+
+def make_time_series_split(n_samples, desired_splits=5):
+    """Build a valid walk-forward splitter for the available sample count."""
+    if n_samples < 3:
+        raise ValueError("At least 3 samples are required for time-series cross-validation.")
+    n_splits = min(desired_splits, n_samples - 1)
+    n_splits = max(2, n_splits)
+    return TimeSeriesSplit(n_splits=n_splits)
+
+
+def walk_forward_scores(estimator, X, y, desired_splits=5, scoring='accuracy'):
+    """Leak-safe CV where each fold trains only on observations before its test fold."""
+    splitter = make_time_series_split(len(X), desired_splits=desired_splits)
+    return cross_val_score(estimator, X, y, cv=splitter, scoring=scoring)
+
+
+def selected_feature_pipeline(model, k_best):
+    """Put feature selection inside CV so fold scores do not see future training rows."""
+    return Pipeline([
+        ('select', SelectKBest(score_func=f_classif, k=k_best)),
+        ('model', model)
+    ])
+
+
+def fit_calibrated_classifier(estimator, X_train, y_train, desired_splits=3):
+    """Fit sigmoid-calibrated probabilities, falling back to the raw estimator if needed."""
+    if len(np.unique(y_train)) < 2:
+        estimator.fit(X_train, y_train)
+        return estimator
+
+    cv = make_time_series_split(len(X_train), desired_splits=desired_splits)
+    try:
+        calibrated = CalibratedClassifierCV(estimator=clone(estimator), method='sigmoid', cv=cv)
+    except TypeError:
+        calibrated = CalibratedClassifierCV(base_estimator=clone(estimator), method='sigmoid', cv=cv)
+
+    try:
+        calibrated.fit(X_train, y_train)
+        return calibrated
+    except Exception as exc:
+        print(f"   ⚠️  Calibration skipped: {exc}")
+        estimator.fit(X_train, y_train)
+        return estimator
+
+
+def print_baseline_report(y_train, y_test):
+    """Show the trivial benchmark every model must beat."""
+    majority_class = y_train.value_counts().idxmax()
+    baseline_pred = np.full(len(y_test), majority_class)
+    baseline_accuracy = accuracy_score(y_test, baseline_pred)
+    print(f"   Baseline majority-class accuracy: {baseline_accuracy:.3f} (class {majority_class:+.0f})")
+    return baseline_accuracy
+
+
+def print_confidence_report(y_true, y_pred, confidence):
+    """Report whether high-confidence signals are actually more reliable."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    confidence = np.asarray(confidence)
+
+    print("\n🎚️  Confidence Calibration Check:")
+    for low, high in [(0.0, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 1.01)]:
+        mask = (confidence >= low) & (confidence < high)
+        if mask.sum() == 0:
+            continue
+        bucket_accuracy = accuracy_score(y_true[mask], y_pred[mask])
+        coverage = mask.mean()
+        label = f"{low:.0%}-{min(high, 1.0):.0%}"
+        print(f"   {label:<8} | Accuracy: {bucket_accuracy:.3f} | Coverage: {coverage:.1%} ({mask.sum()} samples)")
+
+    high_conf_mask = confidence >= 0.70
+    if high_conf_mask.any():
+        high_conf_accuracy = accuracy_score(y_true[high_conf_mask], y_pred[high_conf_mask])
+        print(f"   High-confidence gate >=70%: {high_conf_accuracy:.3f} accuracy on {high_conf_mask.mean():.1%} of test rows")
+    else:
+        print("   High-confidence gate >=70%: no qualifying test rows")
 
 def create_features(df, pct_threshold=0.01):
     """Create comprehensive technical indicators and ML features for Bitcoin price prediction."""
@@ -170,10 +249,10 @@ def create_features(df, pct_threshold=0.01):
     
     # Fractal indicators
     def is_fractal_high(series, period=5):
-        return series == series.rolling(window=period*2+1, center=True).max()
+        return series == series.rolling(window=period, min_periods=period).max()
     
     def is_fractal_low(series, period=5):
-        return series == series.rolling(window=period*2+1, center=True).min()
+        return series == series.rolling(window=period, min_periods=period).min()
     
     df['fractal_high'] = is_fractal_high(df['price']).astype(int)
     df['fractal_low'] = is_fractal_low(df['price']).astype(int)
@@ -225,9 +304,11 @@ def create_features(df, pct_threshold=0.01):
     # Classification target: 1 if price increases >=1.0% next day, -1 if decreases <=-1.0%, 0 otherwise
     df['future_price'] = df['price'].shift(-1)
     df['pct_change'] = (df['future_price'] - df['price']) / (df['price'] + 1e-8)
-    df['target'] = 0
-    df.loc[df['pct_change'] >= pct_threshold, 'target'] = 1
-    df.loc[df['pct_change'] <= -pct_threshold, 'target'] = -1
+    df['target'] = np.nan
+    valid_future = df['future_price'].notna()
+    df.loc[valid_future, 'target'] = 0
+    df.loc[valid_future & (df['pct_change'] >= pct_threshold), 'target'] = 1
+    df.loc[valid_future & (df['pct_change'] <= -pct_threshold), 'target'] = -1
     
     # Replace inf and nan values in features
     df = df.replace([np.inf, -np.inf], np.nan)
@@ -733,7 +814,7 @@ def main():
     print(f"🔗 Blockchain features: {len(blockchain_features)}")
     
     X_training = training_data[feature_columns]
-    y_training = training_data['target']
+    y_training = training_data['target'].astype(int)
     X_latest = latest_data[feature_columns]
     
     # Handle any remaining NaN values more comprehensively
@@ -770,6 +851,7 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(X_training, y_training, test_size=0.25, shuffle=False)
     
     print(f"\n🔄 Training Set: {len(X_train)} samples | Test Set: {len(X_test)} samples")
+    print_baseline_report(y_train, y_test)
     
     print("--- PERFORMING FEATURE SELECTION ---")
     # Feature selection using statistical tests
@@ -866,11 +948,12 @@ def main():
     for name, model in models.items():
         print(f"   Training {name}...", end=' ')
         
-        # Train model on full selected training data
+        # Cross-validation score. Feature selection is inside the pipeline to avoid leakage.
+        cv_model = selected_feature_pipeline(clone(model), k_best)
+        cv_scores = walk_forward_scores(cv_model, X_train, y_train, desired_splits=5, scoring='accuracy')
+
+        # Train model on full selected training data for the holdout evaluation.
         model.fit(X_train_selected, y_train)
-        
-        # Cross-validation score
-        cv_scores = cross_val_score(model, X_train_selected, y_train, cv=3, scoring='accuracy')
         
         # Test predictions (for validation)
         y_pred = model.predict(X_test_selected)
@@ -884,7 +967,7 @@ def main():
         
         trained_models[name] = model
         
-        print(f"CV: {cv_scores.mean():.3f}±{cv_scores.std():.3f} | Test: {test_accuracy:.3f}")
+        print(f"Walk-forward CV: {cv_scores.mean():.3f}±{cv_scores.std()*2:.3f} | Test: {test_accuracy:.3f}")
     
     # Create ensemble model
     print(f"\n--- CREATING ENSEMBLE MODEL ---")
@@ -892,19 +975,29 @@ def main():
     
     # Select best performing models for ensemble
     best_models = sorted(model_scores.items(), key=lambda x: x[1]['cv_mean'], reverse=True)[:5]
-    ensemble_estimators = [(name, trained_models[name]) for name, _ in best_models]
+    ensemble_estimators = [(name, clone(models[name])) for name, _ in best_models]
     
     ensemble = VotingClassifier(
         estimators=ensemble_estimators,
         voting='soft'  # Use probability predictions
     )
     
-    # Train ensemble on full training data
-    ensemble.fit(X_train_selected, y_train)
+    ensemble_cv_model = selected_feature_pipeline(
+        VotingClassifier(
+            estimators=[(name, clone(models[name])) for name, _ in best_models],
+            voting='soft'
+        ),
+        k_best
+    )
+    ensemble_cv_scores = walk_forward_scores(ensemble_cv_model, X_train, y_train, desired_splits=5, scoring='accuracy')
+    print(f"   🔄 Ensemble walk-forward CV: {ensemble_cv_scores.mean():.3f} (±{ensemble_cv_scores.std()*2:.3f})")
+
+    # Train a calibrated ensemble on full selected training data for holdout and latest predictions.
+    calibrated_ensemble = fit_calibrated_classifier(ensemble, X_train_selected, y_train, desired_splits=3)
     
     # Validation predictions
-    y_pred_ensemble = ensemble.predict(X_test_selected)
-    y_proba_ensemble = ensemble.predict_proba(X_test_selected)
+    y_pred_ensemble = calibrated_ensemble.predict(X_test_selected)
+    y_proba_ensemble = calibrated_ensemble.predict_proba(X_test_selected)
     confidence_scores = np.max(y_proba_ensemble, axis=1)
     
     # Performance evaluation
@@ -912,6 +1005,7 @@ def main():
     
     print(f"   ✅ Ensemble accuracy: {ensemble_accuracy:.3f}")
     print(f"   📊 Using top {len(ensemble_estimators)} models: {[name for name, _ in ensemble_estimators]}")
+    print_confidence_report(y_test, y_pred_ensemble, confidence_scores)
     
     # NEXT MOVE PREDICTION - The main goal!
     print(f"\n--- PREDICTING NEXT MOVE ---")
@@ -919,8 +1013,8 @@ def main():
     print("=" * 80)
     
     # Make prediction on latest data
-    next_prediction = ensemble.predict(X_latest_selected)[0]
-    next_probabilities = ensemble.predict_proba(X_latest_selected)[0]
+    next_prediction = calibrated_ensemble.predict(X_latest_selected)[0]
+    next_probabilities = calibrated_ensemble.predict_proba(X_latest_selected)[0]
     next_confidence = np.max(next_probabilities)
     
     # Get current price and date
@@ -1084,7 +1178,7 @@ def main():
         import traceback
         traceback.print_exc()
     
-    return ensemble, selected_features, next_prediction, next_confidence, current_price
+    return calibrated_ensemble, selected_features, next_prediction, next_confidence, current_price
 
 
 if __name__ == "__main__":
