@@ -12,7 +12,7 @@ try:
     from sklearn.model_selection import train_test_split, cross_val_score, TimeSeriesSplit
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-    from sklearn.linear_model import LogisticRegression
+    from sklearn.linear_model import LogisticRegression, LinearRegression
     from sklearn.svm import SVC
     from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, QuantileTransformer
     from sklearn.pipeline import Pipeline
@@ -22,7 +22,7 @@ except Exception:
     train_test_split = cross_val_score = TimeSeriesSplit = None
     CalibratedClassifierCV = None
     classification_report = confusion_matrix = accuracy_score = None
-    LogisticRegression = SVC = None
+    LogisticRegression = LinearRegression = SVC = None
     StandardScaler = MinMaxScaler = RobustScaler = PowerTransformer = QuantileTransformer = None
     Pipeline = None
     clone = None
@@ -853,17 +853,6 @@ def _gpu_rf(**kwargs):
     return RandomForestClassifier(**kwargs)
 
 
-def _gpu_lr(**kwargs):
-    """Return a LogisticRegression, preferring cuML when CUDA is available.
-
-    cuML LR does not accept `class_weight` or `random_state`.
-    All other sklearn-compatible kwargs (e.g. max_iter, C) are forwarded.
-    """
-    if CUDA_AVAILABLE and _cuml_LR is not None:
-        gpu_kw = {k: v for k, v in kwargs.items() if k not in ('class_weight', 'random_state')}
-        return _cuml_LR(**gpu_kw)
-    return LogisticRegression(**kwargs)
-
 
 def _gpu_scalers():
     """Build the five-scaler dict, substituting cuML GPU scalers where supported.
@@ -985,18 +974,6 @@ class EnsembleConfidenceBooster:
             )
             gb.fit(X_scaled, y_train)
             self.models[scaler_name]['gb'] = (gb, scaler)
-            
-            # Logistic Regression — _gpu_lr strips class_weight/random_state for cuML
-            try:
-                lr = _gpu_lr(
-                    class_weight='balanced', random_state=random_state, max_iter=1000
-                )
-            except Exception:
-                lr = LogisticRegression(
-                    class_weight='balanced', random_state=random_state, max_iter=1000
-                )
-            lr.fit(X_scaled, y_train)
-            self.models[scaler_name]['lr'] = (lr, scaler)
 
     def _as_feature_frame(self, X_test_latest):
         """Return one prediction row with the same feature names used during scaler fit."""
@@ -1028,7 +1005,7 @@ class EnsembleConfidenceBooster:
         breakdown = []
         
         for scaler_name in sorted(self.models.keys()):
-            for model_type in ['rf', 'gb', 'lr']:
+            for model_type in ['rf', 'gb']:
                 model, scaler = self.models[scaler_name][model_type]
                 X_scaled = scaler.transform(X_row)
                 pred = model.predict(X_scaled)[0]
@@ -1360,10 +1337,16 @@ def main():
         n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42
     )
     
-    # Logistic Regression with scaling
-    lr_pipe = Pipeline([
+    # MinMaxScaler + Gradient Boosting (balanced learner)
+    gb_minmax_pipe = Pipeline([
+        ('scaler', MinMaxScaler()),
+        ('gb', GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42))
+    ])
+    
+    # Linear Regression with StandardScaler
+    lr_scaled_pipe = Pipeline([
         ('scaler', StandardScaler()),
-        ('lr', LogisticRegression(class_weight='balanced', random_state=42, max_iter=1000))
+        ('lr', LinearRegression())
     ])
     
     # SVM with scaling
@@ -1382,7 +1365,8 @@ def main():
     ensemble = VotingClassifier([
         ('rf', rf),
         ('gb', gb), 
-        ('lr', lr_pipe),
+        ('gb_minmax', gb_minmax_pipe),
+        ('lr_scaled', lr_scaled_pipe),
         ('svm', svm_pipe),
         ('et', et)
     ], voting='soft')
@@ -1466,7 +1450,7 @@ def main():
 
     print(f"\n✅ Analysis Complete!")
     print(f"   📊 Dataset: {len(X_train)} train + {len(X_test)} test samples")
-    print(f"   🤖 Ensemble: 5 algorithms (RF, GB, LR, SVM, ExtraTrees)")
+    print(f"   🤖 Ensemble: 6 algorithms (RF, GB, GB-MinMax, LR-Scaled, SVM, ExtraTrees)")
     print(f"   📈 Features: {len(feature_cols)} technical indicators")
 
 if __name__ == "__main__":

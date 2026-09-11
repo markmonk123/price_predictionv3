@@ -315,10 +315,48 @@ class EnhancedBitcoinForecaster:
         returns = prices.pct_change().fillna(0.0)
 
         mean_price = float(prices.mean())
-        predicted_min = float(prices.min())
-        predicted_max = float(prices.max())
-        inclusive_min = float(min(predicted_min, current_price))
-        inclusive_max = float(max(predicted_max, current_price))
+        raw_min = float(prices.min())
+        raw_max = float(prices.max())
+        inclusive_min = float(min(raw_min, current_price))
+        inclusive_max = float(max(raw_max, current_price))
+
+        # Adaptive BB-percentile bias: derive upper/lower bounds from the predicted
+        # price series itself, using a blend of Bollinger Bands (mean +/- k*std)
+        # and percentile bands (e.g. 95th / 5th). This makes the predicted range
+        # adapt to the model-forecast volatility instead of a hardcoded fraction
+        # of the directional move.
+        #
+        #   forecast_upper = alpha * bb_upper + (1 - alpha) * p95
+        #   forecast_lower = alpha * bb_lower + (1 - alpha) * p05
+        #
+        # For a bullish forecast we extend max up to forecast_upper (BB-percentile
+        # ceiling) and allow min to dip down to forecast_lower (handle-bar wick).
+        # Bearish is symmetric. BB k=1.5σ + percentile blend = adaptive tolerance.
+        BB_K = 1.5               # Bollinger Band sigma multiplier (~87% coverage)
+        PCT_BLEND = 0.6          # weight on BB vs percentile (1-PCT_BLEND for pct)
+        bullish = mean_price > current_price
+        # Defensive std/percentile computation (guard against degenerate series)
+        price_std = float(prices.std()) if len(prices) > 1 else 0.0
+        try:
+            p05 = float(np.percentile(prices, 5))
+            p95 = float(np.percentile(prices, 95))
+        except Exception:
+            p05, p95 = raw_min, raw_max
+        bb_upper = mean_price + BB_K * price_std
+        bb_lower = mean_price - BB_K * price_std
+        # Blend BB (smooth) with percentile (robust to tails)
+        adaptive_upper = PCT_BLEND * bb_upper + (1.0 - PCT_BLEND) * p95
+        adaptive_lower = PCT_BLEND * bb_lower + (1.0 - PCT_BLEND) * p05
+        if bullish:
+            # Upside bias: extend max up to the adaptive (BB-percentile) ceiling.
+            predicted_max = max(raw_max, adaptive_upper)
+            # Allow a handle-bar dip down to the adaptive floor (BB-percentile).
+            predicted_min = min(raw_min, adaptive_lower)
+        else:
+            # Downside bias: extend min down to the adaptive (BB-percentile) floor.
+            predicted_min = min(raw_min, adaptive_lower)
+            # Allow a handle-bar spike up to the adaptive ceiling (BB-percentile).
+            predicted_max = max(raw_max, adaptive_upper)
         stats = {
             'current_price': float(current_price),
             'horizon_hours': int(horizon_hours),
