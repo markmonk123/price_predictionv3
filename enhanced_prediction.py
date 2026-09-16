@@ -1343,10 +1343,10 @@ def main():
         ('gb', GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42))
     ])
     
-    # Linear Regression with StandardScaler
+    # Logistic Regression with StandardScaler
     lr_scaled_pipe = Pipeline([
         ('scaler', StandardScaler()),
-        ('lr', LinearRegression())
+        ('lr', LogisticRegression(max_iter=2000, class_weight='balanced', random_state=42))
     ])
     
     # SVM with scaling
