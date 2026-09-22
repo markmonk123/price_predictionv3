@@ -25,6 +25,17 @@ except ImportError as e:
     print(json.dumps({"error": f"Import error: {str(e)}", "errorType": "ImportError"}))
     sys.exit(1)
 
+try:
+    from config.prediction_spec import (
+        HORIZON_MINUTES,
+        PCT_THRESHOLD,
+        TIMEFRAME_LABEL,
+        spec_summary,
+    )
+except Exception as _spec_err:
+    print(json.dumps({"error": f"prediction_spec import failed: {_spec_err}", "errorType": "ImportError"}))
+    sys.exit(1)
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Run Bitcoin prediction model')
     parser.add_argument('--price', type=float, required=True, help='Current Bitcoin price')
@@ -130,7 +141,11 @@ def run_prediction(price, volume, timestamp=None, window_size=60, allow_syntheti
             data_source = "synthetic"
 
         # Create enhanced features
-        enhanced_df = create_enhanced_features(df, pct_threshold=0.001)
+        enhanced_df = create_enhanced_features(
+            df,
+            pct_threshold=PCT_THRESHOLD,
+            horizon_steps=HORIZON_MINUTES,
+        )
 
         # Select features (excluding target variables and non-predictive columns)
         feature_cols = [col for col in enhanced_df.columns 
@@ -155,15 +170,14 @@ def run_prediction(price, volume, timestamp=None, window_size=60, allow_syntheti
         # Get prediction class
         prediction = model.predict(X)[0]
 
-        # Map probabilities to classes (-1, 0, 1)
-        if len(probs) == 2:  # Binary classification
-            decrease_prob = probs[0]
-            increase_prob = probs[1]
-            no_change_prob = 0
-        else:  # Multi-class classification
-            decrease_prob = probs[0]
-            no_change_prob = probs[1]
-            increase_prob = probs[2]
+        # Map probabilities to classes (-1, 0, 1) via model.classes_ so that
+        # classes absent from the training window (e.g. only {-1, 1} observed)
+        # don't get mislabeled by positional indexing. probs[i] corresponds
+        # to model.classes_[i], NOT to a fixed {-1, 0, 1} slot.
+        class_to_prob = dict(zip(model.classes_, probs))
+        decrease_prob = float(class_to_prob.get(-1, 0.0))
+        no_change_prob = float(class_to_prob.get(0, 0.0))
+        increase_prob = float(class_to_prob.get(1, 0.0))
 
         # Return result as JSON
         result = {
@@ -175,8 +189,10 @@ def run_prediction(price, volume, timestamp=None, window_size=60, allow_syntheti
             "decrease_probability": float(decrease_prob),
             "no_change_probability": float(no_change_prob),
             "confidence": float(max(increase_prob, decrease_prob, no_change_prob)),
-            "timeframe": "1 minute",
-            "threshold": 0.001,
+            "timeframe": TIMEFRAME_LABEL,
+            "threshold": float(PCT_THRESHOLD),
+            "horizon_minutes": int(HORIZON_MINUTES),
+            "spec": spec_summary(),
             "simulated": data_source == "synthetic",
             "data_source": data_source
         }

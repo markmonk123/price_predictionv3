@@ -22,6 +22,21 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+try:
+    from config.prediction_spec import (
+        HORIZON_MINUTES,
+        PCT_THRESHOLD,
+        TIMEFRAME_LABEL,
+        HORIZON_HOURS,
+        spec_summary,
+    )
+except Exception:  # pragma: no cover
+    HORIZON_MINUTES = 15
+    PCT_THRESHOLD = 0.005
+    TIMEFRAME_LABEL = '15 minutes'
+    HORIZON_HOURS = 12
+    spec_summary = lambda: f'horizon={HORIZON_MINUTES}m, threshold=±{PCT_THRESHOLD*100:.1f}%'
+
 def make_time_series_split(n_samples, desired_splits=5):
     """Build a valid walk-forward splitter for the available sample count."""
     if n_samples < 3:
@@ -99,7 +114,14 @@ def print_confidence_report(y_true, y_pred, confidence):
         print("   High-confidence gate >=70%: no qualifying test rows")
 
 def create_features(df, pct_threshold=0.01):
-    """Create comprehensive technical indicators and ML features for Bitcoin price prediction."""
+    """Daily-horizon feature factory.
+
+    NOTE: This function intentionally does NOT use the shared
+    `PCT_THRESHOLD` from `config.prediction_spec` because its
+    downstream walk-forward CV scores were calibrated against a
+    ±1.0% daily label. Switching this to the shared spec would
+    invalidate those backtests. If you want this function on the
+    shared spec, retrain & revalidate first (see SOP §3 F4)."""
     df = df.copy()  # Avoid modifying original DataFrame
     
     # Basic time features
