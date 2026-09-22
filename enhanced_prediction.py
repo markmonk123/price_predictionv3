@@ -24,11 +24,13 @@ except Exception:
     classification_report = confusion_matrix = accuracy_score = None
     LogisticRegression = LinearRegression = SVC = None
 
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning, module='sklearn.svm._base')
+warnings.filterwarnings('ignore', category=FutureWarning, module='sklearn.calibration')
+
 try:
     from config.prediction_spec import (
         HORIZON_MINUTES,
-        PCT_THRESHOLD,
-        TIMEFRAME_LABEL,
         HORIZON_GRID_MINUTES,
         THRESHOLD_GRID,
         HORIZON_HOURS,
@@ -105,8 +107,27 @@ def make_time_series_split(n_samples, desired_splits=5):
 
 
 def walk_forward_scores(estimator, X, y, desired_splits=5, scoring='accuracy'):
+    """Walk-forward CV that skips folds whose training slice has only one class.
+
+    Time-series splits on small windows frequently produce early folds where
+    the entire training slice is monotonic, leaving GradientBoostingClassifier
+    (and others) unable to encode y. We drop those folds instead of letting
+    them poison the mean with NaNs.
+    """
+    import numpy as _np
     splitter = make_time_series_split(len(X), desired_splits=desired_splits)
-    return cross_val_score(estimator, X, y, cv=splitter, scoring=scoring)
+    y_arr = _np.asarray(y)
+    scores = []
+    for train_idx, _test_idx in splitter.split(X):
+        y_train_fold = y_arr[train_idx]
+        if len(_np.unique(y_train_fold)) < 2:
+            continue  # fold has only one class; drop it
+        fold_scores = cross_val_score(
+            clone(estimator), X.iloc[train_idx], y_arr[train_idx],
+            cv=2, scoring=scoring,
+        )
+        scores.append(fold_scores.mean())
+    return _np.array(scores) if scores else _np.array([_np.nan])
 
 
 def fit_calibrated_classifier(estimator, X_train, y_train, desired_splits=3):

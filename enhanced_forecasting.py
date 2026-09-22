@@ -115,7 +115,9 @@ class EnhancedBitcoinForecaster:
 
         # Snap to 15-minute windows and preserve all windows via interpolation/fill.
         out = out.set_index('date').resample('15min').last()
-        out['price'] = out['price'].interpolate(method='time').ffill().bfill()
+        # No backward fill, no time interpolation across the full grid -- both leak future observations into the past.
+        # Forward-fill only so each missing bar carries the most recent past observed price.
+        out['price'] = out['price'].ffill()
         out = out.reset_index()
         return out
 
@@ -199,7 +201,8 @@ class EnhancedBitcoinForecaster:
         # Stabilize NaN/inf introduced by rolling/shift so windows are not dropped
         df = df.replace([np.inf, -np.inf], np.nan)
         feature_cols = [c for c in df.columns if c not in ['date', 'price']]
-        df[feature_cols] = df[feature_cols].ffill().bfill().fillna(0.0)
+        # Forward-fill only within each segment; the caller is responsible for not bridging the train/test boundary.
+        df[feature_cols] = df[feature_cols].ffill().fillna(0.0)
         return df
 
     def prepare_multistep_data(self, df, forecast_horizon=48):
@@ -215,7 +218,8 @@ class EnhancedBitcoinForecaster:
         # Only rows without future targets are removed; feature windows are preserved.
         prepared = df.dropna(subset=target_cols).copy()
         prepared = prepared.replace([np.inf, -np.inf], np.nan)
-        prepared[feature_cols] = prepared[feature_cols].ffill().bfill().fillna(0.0)
+        # Forward-fill only within each segment; the caller is responsible for not bridging the train/test boundary.
+        prepared[feature_cols] = prepared[feature_cols].ffill().fillna(0.0)
 
         return prepared, feature_cols, target_cols
 
