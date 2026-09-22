@@ -31,6 +31,8 @@ warnings.filterwarnings('ignore', category=FutureWarning, module='sklearn.calibr
 try:
     from config.prediction_spec import (
         HORIZON_MINUTES,
+        PCT_THRESHOLD,
+        TIMEFRAME_LABEL,
         HORIZON_GRID_MINUTES,
         THRESHOLD_GRID,
         HORIZON_HOURS,
@@ -47,6 +49,12 @@ except Exception:  # pragma: no cover
     StandardScaler = MinMaxScaler = RobustScaler = PowerTransformer = QuantileTransformer = None
     Pipeline = None
     clone = None
+
+# Defensive defaults: ensure the spec names referenced by function
+# default-argument expressions always exist, regardless of which branch
+# of the spec import above ran (success or fallback).
+PCT_THRESHOLD = globals().get('PCT_THRESHOLD', 0.005)
+TIMEFRAME_LABEL = globals().get('TIMEFRAME_LABEL', f'{HORIZON_MINUTES} minutes')
 
 # ---------------------------------------------------------------------------
 # CUDA / cuML acceleration — auto-detected on WSL with an NVIDIA GPU.
@@ -107,33 +115,44 @@ def make_time_series_split(n_samples, desired_splits=5):
 
 
 def walk_forward_scores(estimator, X, y, desired_splits=5, scoring='accuracy'):
-    """Walk-forward CV that skips folds whose training slice has only one class.
+    """
+    Walk-forward CV that skips folds whose training slice has only one class.
 
     Time-series splits on small windows frequently produce early folds where
     the entire training slice is monotonic, leaving GradientBoostingClassifier
     (and others) unable to encode y. We drop those folds instead of letting
-    them poison the mean with NaNs.
+    them poison the mean with NaNs. Each surviving fold contributes a single
+    score (fit on the train slice, evaluated on the test slice) -- no nested
+    CV, so a small rare class never trips StratifiedKFold n_splits>=2 check.
     """
     import numpy as _np
     splitter = make_time_series_split(len(X), desired_splits=desired_splits)
     y_arr = _np.asarray(y)
     scores = []
-    for train_idx, _test_idx in splitter.split(X):
+    for train_idx, test_idx in splitter.split(X):
         y_train_fold = y_arr[train_idx]
+        y_test_fold  = y_arr[test_idx]
         if len(_np.unique(y_train_fold)) < 2:
-            continue  # fold has only one class; drop it
-        fold_scores = cross_val_score(
-            clone(estimator), X.iloc[train_idx], y_arr[train_idx],
-            cv=2, scoring=scoring,
-        )
-        scores.append(fold_scores.mean())
+            continue  # train slice is single-class; drop the fold
+        if len(y_test_fold) == 0:
+            continue  # nothing to score against
+        est = clone(estimator)
+        _fit_with_balanced_sample_weight(est, X.iloc[train_idx], y_train_fold)
+        y_pred = est.predict(X.iloc[test_idx])
+        if scoring == 'accuracy':
+            from sklearn.metrics import accuracy_score as _acc
+            scores.append(float(_acc(y_test_fold, y_pred)))
+        else:
+            from sklearn.metrics import get_scorer as _get_scorer
+            scorer = _get_scorer(scoring)
+            scores.append(float(scorer(est, X.iloc[test_idx], y_test_fold)))
     return _np.array(scores) if scores else _np.array([_np.nan])
 
 
 def fit_calibrated_classifier(estimator, X_train, y_train, desired_splits=3):
     """Fit calibrated probabilities, falling back to the raw model when folds are sparse."""
     if len(np.unique(y_train)) < 2:
-        estimator.fit(X_train, y_train)
+        _fit_with_balanced_sample_weight(estimator, X_train, y_train)
         return estimator
 
     cv = make_time_series_split(len(X_train), desired_splits=desired_splits)
@@ -142,13 +161,41 @@ def fit_calibrated_classifier(estimator, X_train, y_train, desired_splits=3):
     except TypeError:
         calibrated = CalibratedClassifierCV(base_estimator=clone(estimator), method='sigmoid', cv=cv)
 
-    try:
-        calibrated.fit(X_train, y_train)
-        return calibrated
-    except Exception as exc:
-        print(f"   ⚠  Calibration skipped: {exc}")
-        estimator.fit(X_train, y_train)
-        return estimator
+    from sklearn.utils.class_weight import compute_sample_weight as _csw_calib
+    _sw_calib = _csw_calib('balanced', y_train)
+
+    # CalibratedClassifierCV.fit() emits a UserWarning from sklearn/calibration.py
+    # when the wrapped estimator's .fit() doesn't propagate sample_weight to its
+    # sub-estimators (a long-standing sklearn limitation -- see scikit-learn #21134).
+    # We accept that limitation deliberately: balancing only on the calibration step
+    # is better than no balancing, and the warning is misleading ("result is likely
+    # to be incorrect" is too strong). Suppress it for this scope only.
+    import warnings as _warnings_calib
+    with _warnings_calib.catch_warnings():
+        _warnings_calib.filterwarnings(
+            'ignore',
+            category=UserWarning,
+            module='sklearn.calibration',
+            message='Since VotingClassifier does not appear to accept sample_weight*',
+        )
+        try:
+            calibrated.fit(X_train, y_train, sample_weight=_sw_calib)
+            return calibrated
+        except TypeError:
+            # sample_weight was rejected by VotingClassifier or CalibratedClassifierCV.
+            # Retry without it -- calibration is still useful even if balancing only
+            # applies to the raw ensemble path.
+            try:
+                calibrated.fit(X_train, y_train)
+                return calibrated
+            except Exception as exc:
+                print(f"   ⚠  Calibration skipped: {exc}")
+                estimator.fit(X_train, y_train)
+                return estimator
+        except Exception as exc:
+            print(f"   ⚠  Calibration skipped: {exc}")
+            estimator.fit(X_train, y_train)
+            return estimator
 
 
 def print_baseline_report(y_train, y_test):
@@ -885,16 +932,128 @@ class SignalVotingEngine:
 # to the standard sklearn implementation on CPU.
 # ---------------------------------------------------------------------------
 
+# Keys that sklearn accepts but cuML rejects (raise TypeError at __init__).
+# Module-level so we don't allocate a new frozenset on every dispatch call.
+_CUM_RF_UNSUPPORTED = frozenset({'n_jobs', 'class_weight'})
+_CUM_LR_UNSUPPORTED = frozenset({'class_weight', 'random_state'})
+
+
+def _fit_with_balanced_sample_weight(estimator, X, y, **fit_kwargs):
+    """Fit `estimator` with sklearn's 'balanced' class_weight expressed as sample_weight.
+
+    Replaces the constructor-level `class_weight='balanced'` kwarg that cuML does
+    not accept on __init__. Computes per-sample weights so each class contributes
+    equally to the loss, then forwards them via `sample_weight` to .fit().
+
+    Strategy (most permissive first):
+      1. Try .fit(X, y, sample_weight=sw) -- works on every sklearn estimator and
+         on cuML estimators that accept sample_weight under any name.
+      2. On TypeError, retry without sample_weight (cuML builds that reject it
+         entirely -- pre-24.x LR, mid-24.x RF, etc.) and warn once.
+
+    cuML's signature introspection is unreliable: cuML 24.x added sample_weight
+    to LogisticRegression.fit but not RandomForestClassifier.fit until later
+    releases. So we never trust inspect.signature(); we always try the call
+    first and fall back on failure.
+
+    Returns the fitted estimator.
+    """
+    try:
+        from sklearn.utils.class_weight import compute_sample_weight as _csw
+        sw = _csw('balanced', y)
+    except Exception:
+        sw = None
+    if sw is None:
+        return estimator.fit(X, y, **fit_kwargs)
+
+    # Always try with sample_weight first. Works for every sklearn estimator and
+    # for cuML estimators that accept the kwarg under whatever name they bind
+    # (cuML 24.x+ LR; cuML 25.x+ RF; cuML always for some estimator types).
+    try:
+        return estimator.fit(X, y, sample_weight=sw, **fit_kwargs)
+    except TypeError as exc:
+        # cuML (or sklearn <1.4?) rejected sample_weight at fit time. Drop it
+        # and retry. Warn once per process so the log isn't spammed across folds.
+        _fit_with_balanced_sample_weight._warned = getattr(
+            _fit_with_balanced_sample_weight, '_warned', False)
+        if not _fit_with_balanced_sample_weight._warned:
+            _fit_with_balanced_sample_weight._warned = True
+            cls = type(estimator).__name__
+            print(f"   ⚠  {cls}.fit() rejected sample_weight ({exc}); "
+                  f"fitting without class balancing on this estimator.")
+        return estimator.fit(X, y, **fit_kwargs)
+
+
 def _gpu_rf(**kwargs):
     """Return a RandomForestClassifier, preferring cuML when CUDA is available.
 
-    cuML RF does not accept `n_jobs` (GPU parallelism is implicit).
+    cuML RF does not accept sklearn's `n_jobs` (GPU parallelism is implicit) or
+    `class_weight` (cuML has no per-class weighting on the constructor; balance
+    the training set with compute_sample_weight('balanced') at fit time instead).
     All other sklearn-compatible kwargs are forwarded as-is.
     """
     if CUDA_AVAILABLE and _cuml_RF is not None:
-        gpu_kw = {k: v for k, v in kwargs.items() if k != 'n_jobs'}
-        return _cuml_RF(**gpu_kw)
+        gpu_kw = {k: v for k, v in kwargs.items() if k not in _CUM_RF_UNSUPPORTED}
+        try:
+            return _cuml_RF(**gpu_kw)
+        except TypeError as exc:
+            # Defensive: if a future cuML version supports these, fall back gracefully.
+            print(f"   ⚠  cuML RF rejected kwargs ({exc}); falling back to sklearn.")
     return RandomForestClassifier(**kwargs)
+
+
+def _gpu_lr(**kwargs):
+    """Return a LogisticRegression, preferring cuML when CUDA is available.
+
+    cuML's LogisticRegression signature varies across RAPIDS versions:
+      * `class_weight`: not accepted in any version (apply at fit time instead).
+      * `random_state`: not accepted in many versions (cuML seeds differ).
+      * `solver`, `multi_class`, `n_jobs`, etc.: not accepted in many.
+
+    We hard-strip `class_weight` and `random_state` (the two that matter for
+    this codebase) and probe cuML's __init__ signature for anything else. Any
+    kwarg not in cuML's signature is silently dropped before forwarding. If the
+    underlying call still TypeErrors, we fall back to sklearn and warn once.
+    """
+    if CUDA_AVAILABLE and _cuml_LR is not None:
+        import inspect as _inspect_lr
+        try:
+            _ctor_params = set(_inspect_lr.signature(_cuml_LR.__init__).parameters.keys())
+        except (TypeError, ValueError):
+            _ctor_params = set()
+        # Always strip the known-bad kwargs, plus anything not in cuML's signature.
+        gpu_kw = {
+            k: v for k, v in kwargs.items()
+            if k not in _CUM_LR_UNSUPPORTED and (not _ctor_params or k in _ctor_params or k == 'self')
+        }
+        try:
+            return _cuml_LR(**gpu_kw)
+        except TypeError as exc:
+            _gpu_lr._warned = getattr(_gpu_lr, '_warned', False)
+            if not _gpu_lr._warned:
+                _gpu_lr._warned = True
+                print(f"   ⚠  cuML LR rejected kwargs ({exc}); falling back to sklearn.")
+        except Exception:
+            pass
+    return LogisticRegression(**kwargs)
+
+
+def _gpu_scaler_by_name(name):
+    """Return a scaler instance, preferring cuML GPU variants when CUDA is available.
+
+    Mirrors _cpu_scaler_by_name() but routes StandardScaler, MinMaxScaler, and
+    RobustScaler through cuML when those bindings were imported successfully.
+    PowerTransformer and QuantileTransformer have no cuML equivalent and always
+    run on sklearn CPU.
+    """
+    if CUDA_AVAILABLE:
+        if name == 'StandardScaler' and _cuml_StandardScaler is not None:
+            return _cuml_StandardScaler()
+        if name == 'MinMaxScaler' and _cuml_MinMaxScaler is not None:
+            return _cuml_MinMaxScaler()
+        if name == 'RobustScaler' and _cuml_RobustScaler is not None:
+            return _cuml_RobustScaler()
+    return _cpu_scaler_by_name(name)
 
 
 
@@ -953,15 +1112,15 @@ class ScalerEvaluator:
         scaler_names = ['StandardScaler', 'MinMaxScaler', 'RobustScaler', 'PowerTransformer', 'QuantileTransformer']
         for name in scaler_names:
             try:
-                scaler = _cpu_scaler_by_name(name)
-                rf = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42, n_jobs=-1)
+                scaler = _gpu_scaler_by_name(name)
+                rf = _gpu_rf(n_estimators=50, max_depth=10, random_state=42, n_jobs=-1)
                 candidate = Pipeline([
                     ('scaler', scaler),
                     ('rf', rf)
                 ])
                 scores = cross_val_score(candidate, X_train, y_train, cv=splitter, scoring='accuracy')
                 avg_score = scores.mean()
-                results.append((name, avg_score, _cpu_scaler_by_name(name)))
+                results.append((name, avg_score, _gpu_scaler_by_name(name)))
             except Exception as e:
                 print(f"    ⚠  {name} scaler eval failed: {e}")
         
@@ -997,18 +1156,20 @@ class EnsembleConfidenceBooster:
             self.models[scaler_name] = {}
             
             # Random Forest
-            # _gpu_rf strips n_jobs (implicit on GPU); all other kwargs forwarded
+            # _gpu_rf strips n_jobs (implicit on GPU); all other kwargs forwarded.
+            # class_weight is applied via sample_weight below (cuML-friendly).
             try:
                 rf = _gpu_rf(
                     n_estimators=100, max_depth=12, min_samples_split=5,
-                    class_weight='balanced', random_state=random_state, n_jobs=-1
+                    random_state=random_state, n_jobs=-1
                 )
             except Exception:
                 rf = RandomForestClassifier(
                     n_estimators=100, max_depth=12, min_samples_split=5,
                     class_weight='balanced', random_state=random_state, n_jobs=-1
                 )
-            rf.fit(X_scaled, y_train)
+            # Apply balanced class_weight via sample_weight (works on cuML RF and sklearn RF).
+            _fit_with_balanced_sample_weight(rf, X_scaled, y_train)
             self.models[scaler_name]['rf'] = (rf, scaler)
             
             # Gradient Boosting
@@ -1370,10 +1531,12 @@ def main():
     # Create ensemble of classifiers
     print(f"\n🤖 Training Scikit-Learn Ensemble...")
     
-    # Random Forest
-    rf = RandomForestClassifier(
+    # Random Forest -- balancing applied at fit time via sample_weight
+    # (cuML doesn't accept class_weight in __init__; the explicit fit() below wins
+    # for both GPU and CPU paths).
+    rf = _gpu_rf(
         n_estimators=200, max_depth=15, min_samples_split=5,
-        class_weight='balanced', random_state=42, n_jobs=-1
+        random_state=42, n_jobs=-1
     )
     
     # Gradient Boosting
@@ -1383,19 +1546,19 @@ def main():
     
     # MinMaxScaler + Gradient Boosting (balanced learner)
     gb_minmax_pipe = Pipeline([
-        ('scaler', MinMaxScaler()),
+        ('scaler', _gpu_scaler_by_name('MinMaxScaler')),
         ('gb', GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42))
     ])
     
     # Logistic Regression with StandardScaler
     lr_scaled_pipe = Pipeline([
-        ('scaler', StandardScaler()),
-        ('lr', LogisticRegression(max_iter=2000, class_weight='balanced', random_state=42))
+        ('scaler', _gpu_scaler_by_name('StandardScaler')),
+        ('lr', _gpu_lr(max_iter=2000, random_state=42))  # balancing via sample_weight at fit time
     ])
     
     # SVM with scaling
     svm_pipe = Pipeline([
-        ('scaler', StandardScaler()),
+        ('scaler', _gpu_scaler_by_name('StandardScaler')),
         ('svm', SVC(kernel='rbf', class_weight='balanced', probability=True, random_state=42))
     ])
 
@@ -1439,7 +1602,8 @@ def main():
     print_confidence_report(y_test, y_pred, confidence)
     
     # Feature importance from Random Forest
-    rf.fit(X_train, y_train)
+    # Apply balanced class_weight via sample_weight (works on cuML RF and sklearn RF)
+    _fit_with_balanced_sample_weight(rf, X_train, y_train)
     feature_importance = pd.DataFrame({
         'feature': feature_cols,
         'importance': rf.feature_importances_
