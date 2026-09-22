@@ -1,4 +1,4 @@
-﻿"""
+"""
 Single source of truth for the prediction product spec (F4 / SOP D5 fix).
 
 Every model path in the repo MUST derive its horizon and threshold from this
