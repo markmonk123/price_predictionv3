@@ -10,11 +10,52 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, E
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.pipeline import Pipeline
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
+
+# Optional GPU backends (cuML, XGBoost). Detected at import time.
+CUDA_AVAILABLE = False
+_gpu_count = 0
+_cuml_RF_reg = None
+_cuml_GB_reg = None
+_cuml_StandardScaler = None
+_cuml_MinMaxScaler = None
+_cuml_RobustScaler = None
+_cuml_LinearRegression = None
+XGBOOST_AVAILABLE = False
+try:
+    import cuml
+    from cuml.ensemble import RandomForestRegressor as _cuRFReg
+    from cuml.ensemble import GradientBoostingRegressor as _cuGBReg
+    import cuml.preprocessing as _cuml_prep_reg
+    from cuml.linear_model import LinearRegression as _cuLinReg
+    import cupy as cp_reg
+    _gpu_count = cp_reg.cuda.runtime.getDeviceCount()
+    if _gpu_count > 0:
+        CUDA_AVAILABLE = True
+        cuml.set_global_output_type('numpy')
+        _cuml_RF_reg = _cuRFReg
+        _cuml_GB_reg = _cuGBReg
+        _cuml_StandardScaler = _cuml_prep_reg.StandardScaler
+        _cuml_MinMaxScaler = _cuml_prep_reg.MinMaxScaler
+        _cuml_RobustScaler = _cuml_prep_reg.RobustScaler
+        _cuml_LinearRegression = _cuLinReg
+except Exception:
+    pass
+
+try:
+    import xgboost as xgb
+    XGBOOST_AVAILABLE = True
+except Exception:
+    XGBOOST_AVAILABLE = False
+
+_CUM_RF_REG_UNSUPPORTED = frozenset({'n_jobs'})
+_CUM_GB_REG_UNSUPPORTED = frozenset({'n_jobs'})
+_CUM_RF_REG_FIT_UNSUPPORTED = set()
+_CUM_GB_REG_FIT_UNSUPPORTED = {'sample_weight'}
 
 try:
     from config.prediction_spec import HORIZON_HOURS, spec_summary
@@ -31,30 +72,37 @@ class EnhancedBitcoinForecaster:
         self.trained_models = {}
         self.last_update = None
 
-        # Ensemble base models
+        # Ensemble base models. Each entry is a thunk (zero-arg callable)
+        # that returns the estimator instance -- this defers backend selection
+        # (CPU sklearn vs GPU cuML/XGBoost) to call time so missing deps
+        # never break import. The thunks reference module-level helpers
+        # (_gpu_rf_reg, _gpu_gb_reg, _gpu_scaler_reg, _make_xgb_regressor).
         self.models = {
-            'RandomForest': MultiOutputRegressor(
-                RandomForestRegressor(
-                    n_estimators=250, max_depth=16, min_samples_split=4,
-                    random_state=42, n_jobs=-1
-                )
-            ),
-            'GradientBoosting': MultiOutputRegressor(
-                GradientBoostingRegressor(
-                    n_estimators=200, learning_rate=0.05, max_depth=5,
-                    random_state=42
-                )
-            ),
-            'ExtraTrees': MultiOutputRegressor(
+            'RandomForest':     lambda: MultiOutputRegressor(EnhancedBitcoinForecaster._gpu_rf_reg(
+                n_estimators=250, max_depth=16, min_samples_split=4,
+                random_state=42, n_jobs=-1
+            )),
+            'GradientBoosting': lambda: MultiOutputRegressor(EnhancedBitcoinForecaster._gpu_gb_reg(
+                n_estimators=200, learning_rate=0.05, max_depth=5,
+                random_state=42
+            )),
+            'ExtraTrees':       lambda: MultiOutputRegressor(
                 ExtraTreesRegressor(
                     n_estimators=250, max_depth=14, min_samples_split=3,
                     random_state=42, n_jobs=-1
                 )
             ),
-            'Pipeline_RF': Pipeline([
+            'XGBoost':          lambda: MultiOutputRegressor(EnhancedBitcoinForecaster._make_xgb_regressor()),
+            'Pipeline_RF':      lambda: Pipeline([
                 ('scaler', StandardScaler()),
-                ('rf', MultiOutputRegressor(RandomForestRegressor(n_estimators=150, random_state=7, n_jobs=-1)))
-            ])
+                ('rf', MultiOutputRegressor(RandomForestRegressor(
+                    n_estimators=150, random_state=7, n_jobs=-1)))
+            ]),
+            'Pipeline_RF_Scaled': lambda: Pipeline([
+                ('scaler', EnhancedBitcoinForecaster._gpu_scaler_reg('StandardScaler')),
+                ('rf', MultiOutputRegressor(EnhancedBitcoinForecaster._gpu_rf_reg(
+                    n_estimators=200, max_depth=14, random_state=11, n_jobs=-1)))
+            ]),
         }
 
     @staticmethod
@@ -242,15 +290,21 @@ class EnhancedBitcoinForecaster:
         self.trained_models = {}
         print(f"   📊 Training on {len(X_train)} samples, testing on {len(X_test)} samples")
 
-        for name, model in self.models.items():
+        # Iterate over thunks (zero-arg callables). Invoke each to materialize
+        # the actual estimator instance. Thunks allow deferred backend
+        # selection (cuML/XGBoost/sklearn) without breaking import if a dep is missing.
+        for name, model_factory in self.models.items():
             try:
                 print(f"   🔄 Training {name}...", end=' ')
+                model = model_factory()  # invoke thunk -> estimator
+                backend = EnhancedBitcoinForecaster._detect_estimator_backend(model)
+                backend_marker = "GPU" if backend in ('cuML', 'xgboost') else "CPU"
                 model.fit(X_train, y_train)
                 y_pred = model.predict(X_test)
                 mse = mean_squared_error(y_test, y_pred)
                 mae = mean_absolute_error(y_test, y_pred)
                 self.trained_models[name] = model
-                print(f"MSE: {mse:.2f}, MAE: {mae:.2f}")
+                print(f"[{backend_marker}] MSE: {mse:.2f}, MAE: {mae:.2f}")
             except Exception as e:
                 print(f"Failed: {e}")
 
@@ -388,6 +442,79 @@ class EnhancedBitcoinForecaster:
         stats['forecast_choppiness'] = float(100 * np.log10((tr_sum + 1e-8) / price_span) / np.log10(n))
 
         return stats
+
+    # ----- GPU dispatch helpers (static methods so lambdas inside self.models can call them by name) -----
+    @staticmethod
+    def _gpu_rf_reg(**kwargs):
+        """Return a RandomForestRegressor, preferring cuML when CUDA is available."""
+        if CUDA_AVAILABLE and _cuml_RF_reg is not None:
+            gpu_kw = {k: v for k, v in kwargs.items() if k not in _CUM_RF_REG_UNSUPPORTED}
+            try:
+                return _cuml_RF_reg(**gpu_kw)
+            except TypeError as exc:
+                print(f"   ⚠  cuML RF regressor rejected kwargs ({exc}); falling back to sklearn.")
+        return RandomForestRegressor(**kwargs)
+
+    @staticmethod
+    def _gpu_gb_reg(**kwargs):
+        """Return a GradientBoostingRegressor, preferring cuML when CUDA is available."""
+        if CUDA_AVAILABLE and _cuml_GB_reg is not None:
+            gpu_kw = {k: v for k, v in kwargs.items() if k not in _CUM_GB_REG_UNSUPPORTED}
+            try:
+                return _cuml_GB_reg(**gpu_kw)
+            except TypeError as exc:
+                print(f"   ⚠  cuML GB regressor rejected kwargs ({exc}); falling back to sklearn.")
+        return GradientBoostingRegressor(**kwargs)
+
+    @staticmethod
+    def _gpu_scaler_reg(name):
+        """Return a scaler, preferring cuML GPU variants when CUDA is available."""
+        if CUDA_AVAILABLE:
+            if name == "StandardScaler" and _cuml_StandardScaler is not None:
+                return _cuml_StandardScaler()
+            if name == "MinMaxScaler" and _cuml_MinMaxScaler is not None:
+                return _cuml_MinMaxScaler()
+            if name == "RobustScaler" and _cuml_RobustScaler is not None:
+                return _cuml_RobustScaler()
+        if name == "StandardScaler":
+            return StandardScaler()
+        if name == "MinMaxScaler":
+            return MinMaxScaler()
+        if name == "RobustScaler":
+            return RobustScaler()
+        raise ValueError(f"Unknown scaler name: {name}")
+
+    @staticmethod
+    def _make_xgb_regressor():
+        """Return an XGBRegressor, GPU-accelerated when possible."""
+        if not XGBOOST_AVAILABLE:
+            raise ImportError("xgboost is not installed; pip install xgboost")
+        try:
+            if CUDA_AVAILABLE:
+                return xgb.XGBRegressor(
+                    n_estimators=200, learning_rate=0.05, max_depth=6,
+                    tree_method="hist", device="cuda",
+                    random_state=42, n_jobs=-1,
+                )
+        except Exception:
+            pass
+        return xgb.XGBRegressor(
+            n_estimators=200, learning_rate=0.05, max_depth=6,
+            tree_method="hist",
+            random_state=42, n_jobs=-1,
+        )
+
+    @staticmethod
+    def _detect_estimator_backend(estimator):
+        """Return cuML, xgboost, or sklearn based on the estimator module name."""
+        mod = type(estimator).__module__ or ""
+        if mod.startswith("cuml"):
+            return "cuML"
+        if mod.startswith("xgboost"):
+            return "xgboost"
+        if mod.startswith("sklearn"):
+            return "sklearn"
+        return mod or "unknown"
 
 
 def run_enhanced_forecasting(df_combined):

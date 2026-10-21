@@ -1,7 +1,9 @@
-version: '3.8'
+﻿version: '3.8'
 
 services:
+  # ------------------------------------------------------------------------
   # MongoDB service
+  # ------------------------------------------------------------------------
   mongo:
     image: mongo:latest
     container_name: bitcoin-fix-mongo-dev
@@ -13,7 +15,9 @@ services:
     environment:
       - MONGO_INITDB_DATABASE=bitcoin_fix_dev
 
+  # ------------------------------------------------------------------------
   # MongoDB UI (optional)
+  # ------------------------------------------------------------------------
   mongo-express:
     image: mongo-express:latest
     container_name: bitcoin-fix-mongo-express-dev
@@ -25,7 +29,9 @@ services:
       - mongo
     restart: unless-stopped
 
+  # ------------------------------------------------------------------------
   # Redis for caching
+  # ------------------------------------------------------------------------
   redis:
     image: redis:alpine
     container_name: bitcoin-fix-redis-dev
@@ -35,7 +41,9 @@ services:
       - ./data/redis:/data
     restart: unless-stopped
 
+  # ------------------------------------------------------------------------
   # FIX simulator for development testing
+  # ------------------------------------------------------------------------
   fixsimulator:
     image: quickfixj/quickfixj-server:latest
     container_name: bitcoin-fix-simulator-dev
@@ -44,3 +52,104 @@ services:
     volumes:
       - ./config/quickfixj.cfg:/etc/quickfixj/quickfixj.cfg
     restart: unless-stopped
+
+  # ------------------------------------------------------------------------
+  # Bitcoin price prediction service
+  #
+  # Built from ./Dockerfile (Ubuntu 22.04 + Python 3.11 + non-cached
+  # pip / setuptools / npm, see Dockerfile at the repo root for details).
+  #
+  # Compose here overrides the entrypoint CMD from the Dockerfile so the
+  # container just runs priceprediction.py the same way your
+  # MODEL_RUN_CMD.ps1 does on the host. Override via:
+  #   docker compose run --rm priceprediction python -c "import priceprediction; …"
+  #
+  # GPU support:
+  #   * On Linux hosts with the NVIDIA Container Toolkit the
+  #     `deploy.resources.reservations.devices` block is honored
+  #     automatically by `docker compose up`.
+  #   * On Docker Desktop (Windows / macOS) enable GPU passthrough in
+  #     Settings -> Resources -> WSL Integration or use the WSL2 engine.
+  #   * CPU-only fallback: `docker compose up mongo redis priceprediction`.
+  # ------------------------------------------------------------------------
+  priceprediction:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Override these at build-time if you need a different Python or CUDA.
+        # PYTHON_VERSION=3.11
+        # CUDA_VERSION=12.4.1
+        # UBUNTU_VERSION=22.04
+        PYTHON_VERSION: "3.11"
+        CUDA_VERSION: "12.4.1"
+        UBUNTU_VERSION: "22.04"
+    image: priceprediction:latest
+    container_name: bitcoin-fix-priceprediction-dev
+    # Bind-mount the repo so edits on the host (e.g. via sync-to-wsl.ps1)
+    # land inside the container without rebuilds. /app is the WORKDIR set
+    # in the Dockerfile.
+    volumes:
+      - ./:/app
+      - priceprediction-cache:/root/.cache
+    # Wait for backing services to come up before starting prediction.
+    depends_on:
+      - mongo
+      - redis
+      - fixsimulator
+    # In-network hostnames are resolved automatically by docker compose,
+    # so every connection string inside this block uses service names
+    # (mongo / redis) instead of localhost.
+    environment:
+      # MongoDB
+      MONGODB_URI: "mongodb://mongo:27017/bitcoin_fix_dev"
+      MONGO_INITDB_DATABASE: "bitcoin_fix_dev"
+      # Redis
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      # FIX
+      FIX_HOST: "fixsimulator"
+      FIX_PORT: "9878"
+      FIX_SENDER_COMP_ID: "BITCOIN_FIX_DEV"
+      FIX_TARGET_COMP_ID: "EXCHANGE"
+      # Coinbase (override with your real values via a .env or
+      # docker compose run -e COINBASE_API_KEY=…)
+      COINBASE_API_KEY: "${COINBASE_API_KEY:-your_coinbase_api_key_here}"
+      COINBASE_API_SECRET: "${COINBASE_API_SECRET:-your_coinbase_api_secret_here}"
+      # JWT (do NOT use the dev secret in production — surface it via
+      # a real .env file or a secrets manager).
+      JWT_SECRET: "${JWT_SECRET:-dev_jwt_secret_replace_in_production}"
+      JWT_EXPIRES_IN: "1d"
+      # App
+      NODE_ENV: "development"
+      LOG_LEVEL: "debug"
+      # Force the prediction thresholds to mirror config.prediction_spec.py
+      # (set here for visibility; the Dockerfile installs the same values
+      # via the shared PCT_THRESHOLD line).
+      HORIZON_MINUTES: "15"
+      PCT_THRESHOLD: "0.001"
+    # Default command — override at runtime as noted above.
+    command: ["python", "priceprediction.py"]
+    # Expose nothing by default; priceprediction.py writes to stdout /
+    # files inside the bind mount. If you add a FastAPI / Flask surface
+    # later, expose the matching port here and on the host.
+    ports: []
+    # GPU reservation; ignored on hosts without nvidia-container-toolkit.
+    # `count: all` lets Docker pick the right number if multiple are visible.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+              count: all
+    restart: unless-stopped
+
+# ------------------------------------------------------------------------
+# Named volumes
+# ------------------------------------------------------------------------
+volumes:
+  priceprediction-cache:
+    # Persistent pip / model / RAPIDS cache so rebuilds don't re-download
+    # the CUDA wheels every time. Keep this small; bind-mounted /app
+    # covers source changes for free.
+    name: bitcoin-fix-priceprediction-cache

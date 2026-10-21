@@ -1,3 +1,6 @@
 node_modules
 .venv/
 __pycache__/
+# Persisted fitted-model state cache for enhanced_prediction.py.
+# See services/model_state.py for the save/load API and schema_version.
+services/_state/

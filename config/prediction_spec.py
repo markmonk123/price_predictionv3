@@ -15,7 +15,7 @@ from __future__ import annotations
 #          explicitly opting in via SHARED).
 # ---------------------------------------------------------------------------
 HORIZON_MINUTES: int = 15
-PCT_THRESHOLD: float = 0.005          # ±0.5%
+PCT_THRESHOLD: float = 0.001           # ±0.10% (per MODEL_ACCURACY_DIAGNOSIS_AND_SOP.md F4/D5)
 TIMEFRAME_LABEL: str = f"{HORIZON_MINUTES} minutes"
 
 # ---------------------------------------------------------------------------

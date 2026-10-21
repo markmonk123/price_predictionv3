@@ -7,7 +7,7 @@
 #   1. Verifies WSL/Linux prerequisites (Python 3.10-3.12, NVIDIA driver >= 525,
 #      CUDA toolkit visible, network access to pypi.nvidia.com).
 #   2. Creates or recreates a Python 3.12 .venv at $PROJECT_DIR/.venv.
-#   3. Installs pip >= 24 and the project's pinned cuML/cupy/nvidia-cuda wheels
+#   3. Installs pip >= 24 and the project's pinned cuML/CuPy wheels
 #      (versions read from requirements.txt; can be overridden on the CLI).
 #   4. Runs the same signature probe that enhanced_prediction.py uses
 #      (sample_weight in cuML .fit() for both RF and LR) and prints a clear
@@ -238,7 +238,7 @@ if [[ "$DO_VERIFY_ONLY" -eq 1 ]]; then
 fi
 
 if [[ "${PIP_SECTION_SKIPPED:-0}" -eq 0 ]]; then
-  section "3. Upgrading pip + installing cuML/cupy/nvidia wheels"
+  section "3. Upgrading pip + installing cuML/CuPy wheels"
 
   PIP_LOG=/tmp/setup-cuml-wsl-pip.log
 
@@ -265,8 +265,7 @@ if [[ "${PIP_SECTION_SKIPPED:-0}" -eq 0 ]]; then
   if run_or_echo_capture "$VENV_PIP" install \
       --extra-index-url "$NVIDIA_INDEX" \
       "cuml-cu12==$TARGET_CUML" \
-      "cupy-cuda12x>=$TARGET_CUPY" \
-      "nvidia-cuda-runtime-cu12>=12"; then
+      "cupy-cuda12x>=$TARGET_CUPY"; then
     :
   else
     PIP_RC=$?

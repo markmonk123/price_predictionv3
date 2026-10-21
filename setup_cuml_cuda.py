@@ -52,7 +52,7 @@ REQUIREMENTS_FILE = PROJECT_ROOT / "requirements.txt"
 CUML_VERSION = "26.4.0"            # must match requirements.txt
 CUDA_MAJOR = "12"                  # CUDA 12.x is the RAPIDS 26.x baseline
 PYTHON_MIN = (3, 10)               # RAPIDS 26.x supports 3.10+
-PYTHON_MAX = (3, 13)               # and through 3.12/3.13
+PYTHON_MAX = (3, 12)               # cuML 26.4 wheels are supported on 3.10-3.12
 NVIDIA_DRIVER_MIN = 525            # CUDA 12.0 baseline
 
 # RAPIDS conda install channels / packages
@@ -74,7 +74,7 @@ CONDA_PACKAGES = [
 # are the canonical CUDA 12 source.
 PIP_PACKAGES = [
     f"cuml-cu12=={CUML_VERSION}",
-    "cupy-cuda12x>=13",
+    "cupy-cuda12x>=13.6.0",
 ]
 
 

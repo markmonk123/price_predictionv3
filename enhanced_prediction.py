@@ -1,4 +1,5 @@
 # Optional heavy dependencies are imported lazily to allow module import without them.
+import os
 try:
     import numpy as np
 except Exception:
@@ -40,15 +41,18 @@ try:
     )
 except Exception:  # pragma: no cover
     HORIZON_MINUTES = 15
-    PCT_THRESHOLD = 0.005
+    PCT_THRESHOLD = 0.001   # match config.prediction_spec.py (per SOP D5/F4)
     TIMEFRAME_LABEL = '15 minutes'
     HORIZON_GRID_MINUTES = (5, 15, 30, 60)
     THRESHOLD_GRID = (0.003, 0.005, 0.008)
     HORIZON_HOURS = 12
     spec_summary = lambda: f'horizon={HORIZON_MINUTES}m, threshold=±{PCT_THRESHOLD*100:.1f}%'
-    StandardScaler = MinMaxScaler = RobustScaler = PowerTransformer = QuantileTransformer = None
-    Pipeline = None
-    clone = None
+    # NOTE: do NOT reassign the sklearn names (StandardScaler, Pipeline, clone, etc.)
+    # here. They were successfully imported earlier at module scope and must remain
+    # bound to their real classes. The earlier chain assignment
+    # 'StandardScaler = MinMaxScaler = ... = None' would silently overwrite the good
+    # imports with NoneType on any path where this except branch runs (e.g. a missing
+    # 'config.prediction_spec' module) and break every downstream scaler call.
 
 # Defensive defaults: ensure the spec names referenced by function
 # default-argument expressions always exist, regardless of which branch
@@ -938,6 +942,20 @@ _CUM_RF_UNSUPPORTED = frozenset({'n_jobs', 'class_weight'})
 _CUM_LR_UNSUPPORTED = frozenset({'class_weight', 'random_state'})
 
 
+def _detect_estimator_backend(estimator):
+    """Return 'cuML' if `estimator` is a cuml class, else 'sklearn'.
+
+    Used by _fit_with_balanced_sample_weight to give a more actionable warning
+    when sample_weight is rejected (cuML RF on RAPIDS < 25.x is the common case).
+    """
+    mod = type(estimator).__module__ or ''
+    if mod.startswith('cuml'):
+        return 'cuML'
+    if mod.startswith('sklearn'):
+        return 'sklearn'
+    return mod or 'unknown'
+
+
 def _fit_with_balanced_sample_weight(estimator, X, y, **fit_kwargs):
     """Fit `estimator` with sklearn's 'balanced' class_weight expressed as sample_weight.
 
@@ -946,10 +964,18 @@ def _fit_with_balanced_sample_weight(estimator, X, y, **fit_kwargs):
     equally to the loss, then forwards them via `sample_weight` to .fit().
 
     Strategy (most permissive first):
-      1. Try .fit(X, y, sample_weight=sw) -- works on every sklearn estimator and
-         on cuML estimators that accept sample_weight under any name.
-      2. On TypeError, retry without sample_weight (cuML builds that reject it
-         entirely -- pre-24.x LR, mid-24.x RF, etc.) and warn once.
+      1. Inspect the estimator type:
+         - sklearn Pipeline           -> route sample_weight to its final step via
+                                       <last_step_name>__sample_weight= (sklearn
+                                       >=1.9 rejects top-level sample_weight on
+                                       Pipeline.fit with ValueError, so we cannot
+                                       fall back to it there).
+         - VotingClassifier or any    -> cannot safely route; just call .fit(X, y)
+           _BaseHeterogeneousEnsemble   (no sample_weight) and warn once.
+         - everything else            -> direct .fit(X, y, sample_weight=sw).
+      2. On TypeError or ValueError, retry without sample_weight (cuML builds that
+         reject it entirely -- pre-25.x cuML RF; sklearn Pipelines in 1.9 that we
+         failed to recognize; etc.) and warn once per (estimator class, backend).
 
     cuML's signature introspection is unreliable: cuML 24.x added sample_weight
     to LogisticRegression.fit but not RandomForestClassifier.fit until later
@@ -966,23 +992,87 @@ def _fit_with_balanced_sample_weight(estimator, X, y, **fit_kwargs):
     if sw is None:
         return estimator.fit(X, y, **fit_kwargs)
 
-    # Always try with sample_weight first. Works for every sklearn estimator and
-    # for cuML estimators that accept the kwarg under whatever name they bind
-    # (cuML 24.x+ LR; cuML 25.x+ RF; cuML always for some estimator types).
+    cls = type(estimator).__name__
+    backend = _detect_estimator_backend(estimator)
+
+    # Route 1: sklearn Pipeline -- sklearn >=1.9 raises ValueError when
+    # sample_weight is passed top-level. We rewrite it to the final step's
+    # sample_weight via the stepname__param convention.
     try:
-        return estimator.fit(X, y, sample_weight=sw, **fit_kwargs)
-    except TypeError as exc:
-        # cuML (or sklearn <1.4?) rejected sample_weight at fit time. Drop it
-        # and retry. Warn once per process so the log isn't spammed across folds.
-        _fit_with_balanced_sample_weight._warned = getattr(
-            _fit_with_balanced_sample_weight, '_warned', False)
-        if not _fit_with_balanced_sample_weight._warned:
-            _fit_with_balanced_sample_weight._warned = True
-            cls = type(estimator).__name__
-            print(f"   ⚠  {cls}.fit() rejected sample_weight ({exc}); "
-                  f"fitting without class balancing on this estimator.")
+        from sklearn.pipeline import Pipeline as _Pipeline
+    except Exception:
+        _Pipeline = None
+    if _Pipeline is not None and isinstance(estimator, _Pipeline):
+        last_name, last_est = estimator.steps[-1]
+        try:
+            return estimator.fit(X, y, **{f"{last_name}__sample_weight": sw}, **fit_kwargs)
+        except (TypeError, ValueError) as exc:
+            # The final step rejected sample_weight (e.g. cuML classifier wrapped
+            # in a sklearn Pipeline). Fall back to plain fit, applying sample_weight
+            # to the wrapped sklearn estimator upstream if possible.
+            _emit_sample_weight_skip_warning(cls, backend, exc)
+            try:
+                _fit_with_balanced_sample_weight(last_est, X, y)
+                estimator.steps[-1] = (last_name, last_est)
+                return estimator
+            except Exception:
+                return estimator.fit(X, y, **fit_kwargs)
+
+    # Route 2: Heterogeneous ensembles (VotingClassifier, StackingClassifier).
+    # These run their sub-estimators in parallel via sklearn.utils.parallel, so
+    # we cannot intercept sample_weight for them at this layer; the VotingClassifier
+    # construction site already swaps cuML sub-estimators for sklearn-only ones,
+    # which means a plain fit() without sample_weight suffices for class balancing
+    # via the sklearn estimators' own class_weight='balanced' constructor args.
+    try:
+        from sklearn.ensemble._base import _BaseHeterogeneousEnsemble as _Hetero
+    except Exception:
+        _Hetero = None
+    if _Hetero is not None and isinstance(estimator, _Hetero):
+        _emit_sample_weight_skip_warning(
+            cls, backend,
+            'heterogeneous ensemble -- sample_weight skipped; rely on sub-estimator class_weight=' + repr(getattr(estimator, 'voting', None)),
+        )
         return estimator.fit(X, y, **fit_kwargs)
 
+    # Route 3: everything else -- direct pass-through.
+    try:
+        return estimator.fit(X, y, sample_weight=sw, **fit_kwargs)
+    except (TypeError, ValueError) as exc:
+        _emit_sample_weight_skip_warning(cls, backend, exc)
+        return estimator.fit(X, y, **fit_kwargs)
+
+
+def _emit_sample_weight_skip_warning(cls, backend, exc):
+    """Print the 'sample_weight rejected' warning at most once per (class, backend).
+
+    Factored out of _fit_with_balanced_sample_weight so all three routes share the
+    same dedup logic. The message clearly distinguishes cuML from sklearn and from
+    sklearn Pipeline / heterogeneous-ensemble edge cases so the root cause shows up
+    without ambiguity.
+    """
+    _key = (cls, backend)
+    _seen = getattr(_emit_sample_weight_skip_warning, '_seen', set())
+    if _key in _seen:
+        return
+    _seen.add(_key)
+    _emit_sample_weight_skip_warning._seen = _seen
+    if backend == 'cuML':
+        print(f"   ⚠  cuML {cls}.fit() rejected sample_weight ({exc}); "
+              f"this is a known cuML limitation (cuML estimators don't expose "
+              f"sample_weight as a fit kwarg). Class balancing is being skipped on "
+              f"the GPU side for this estimator type. For ensemble sub-estimators, "
+              f"the construction site should swap cuML for sklearn equivalents.")
+    elif cls == 'Pipeline':
+        print(f"   ⚠  sklearn Pipeline.fit() rejected sample_weight ({exc}); "
+              f"class balancing is being skipped on the final step.")
+    elif 'Heterogeneous' in cls:
+        print(f"   ⚠  sklearn {cls}.fit() can't propagate sample_weight; "
+              f"class balancing is being skipped. Sub-estimators should expose "
+              f"class_weight='balanced' on the constructor instead.")
+    else:
+        print(f"   ⚠  sklearn {cls}.fit() rejected sample_weight ({exc}); "
+              f"class balancing is being skipped for this estimator.")
 
 def _gpu_rf(**kwargs):
     """Return a RandomForestClassifier, preferring cuML when CUDA is available.
@@ -1111,6 +1201,8 @@ class ScalerEvaluator:
         # Use sklearn pipelines for evaluation so scaling is fitted inside each CV fold.
         scaler_names = ['StandardScaler', 'MinMaxScaler', 'RobustScaler', 'PowerTransformer', 'QuantileTransformer']
         for name in scaler_names:
+            scored = None  # (avg_score, fitted_scaler_instance) on success
+            # Primary attempt: GPU-aware scaler + GPU-aware RF pipeline.
             try:
                 scaler = _gpu_scaler_by_name(name)
                 rf = _gpu_rf(n_estimators=50, max_depth=10, random_state=42, n_jobs=-1)
@@ -1119,10 +1211,32 @@ class ScalerEvaluator:
                     ('rf', rf)
                 ])
                 scores = cross_val_score(candidate, X_train, y_train, cv=splitter, scoring='accuracy')
-                avg_score = scores.mean()
-                results.append((name, avg_score, _gpu_scaler_by_name(name)))
-            except Exception as e:
-                print(f"    ⚠  {name} scaler eval failed: {e}")
+                avg_score = float(scores.mean())
+                if np.isnan(avg_score):
+                    raise ValueError("cross_val_score returned NaN")
+                # Re-use a fresh, unfitted scaler instance so the booster can fit+train later.
+                scored = (avg_score, _gpu_scaler_by_name(name))
+            except Exception as e_primary:
+                # Fallback attempt: CPU-only sklearn scaler + sklearn RF. cuML bindings
+                # occasionally change signatures between RAPIDS releases (e.g. moved out
+                # of `cuml.preprocessing`), which surfaces as "NoneType not callable".
+                try:
+                    scaler = _cpu_scaler_by_name(name)
+                    rf = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42, n_jobs=-1)
+                    candidate = Pipeline([
+                        ('scaler', scaler),
+                        ('rf', rf),
+                    ])
+                    scores = cross_val_score(candidate, X_train, y_train, cv=splitter, scoring='accuracy')
+                    avg_score = float(scores.mean())
+                    if np.isnan(avg_score):
+                        raise ValueError("cross_val_score returned NaN")
+                    scored = (avg_score, _cpu_scaler_by_name(name))
+                    print(f"    ↪ {name} GPU path failed ({type(e_primary).__name__}); CPU fallback succeeded (CV={avg_score:.4f}).")
+                except Exception as e_cpu:
+                    print(f"    ⚠  {name} scaler eval failed: {type(e_primary).__name__}: {e_primary}; CPU fallback: {type(e_cpu).__name__}: {e_cpu}")
+            if scored is not None:
+                results.append((name, scored[0], scored[1]))
         
         results.sort(key=lambda x: x[1], reverse=True)
         return results
@@ -1145,6 +1259,13 @@ class EnsembleConfidenceBooster:
         """
         self.models = {}
         self.feature_columns = list(X_train.columns) if hasattr(X_train, 'columns') else None
+        
+        # Defensive: if scaler evaluation produced no usable scalers (all 5
+        # failed on this platform/dependency combination), the booster will
+        # vote "neutral" later rather than crash with ZeroDivisionError.
+        if not scalers_list:
+            print('    ⚠️  ScalerEvaluator returned no results; confidence booster will be neutral.')
+            return
         
         for scaler_name, _, scaler in scalers_list[:3]:
             try:
@@ -1225,13 +1346,23 @@ class EnsembleConfidenceBooster:
                 confidences.append(conf)
                 breakdown.append(f"{scaler_name[:8]}_{model_type.upper()}={pred:+d}@{conf:.2f}")
         
-        # Voting: majority direction
+        # Voting: majority direction. Guard against empty votes (e.g. when the
+        # upstream scaler evaluation returned an empty list and no models were
+        # trained into `self.models`). Without this guard we previously hit
+        # `ZeroDivisionError: division by zero` at `vote_agreement`.
+        if not votes:
+            breakdown_str = '(no scaler/models trained; ensemble unavailable)'
+            return 0, 0.0, breakdown_str
+
         vote_sum = sum(votes)
         final_direction = 1 if vote_sum > 0 else (-1 if vote_sum < 0 else 0)
-        
-        # Confidence boost: average confidences, weighted by vote agreement
-        avg_conf = np.mean(confidences)
-        vote_agreement = abs(vote_sum) / len(votes)  # How unanimous?
+
+        # Confidence boost: average confidences, weighted by vote agreement.
+        # `np.mean(confidences)` is also guarded implicitly because confidences
+        # is only appended alongside votes; we add an explicit safe-mean to
+        # silence `RuntimeWarning: Mean of empty slice`.
+        avg_conf = float(np.mean(confidences)) if confidences else 0.0
+        vote_agreement = abs(vote_sum) / len(votes)  # How unanimous? (safe: votes non-empty)
         boosted_conf = avg_conf * vote_agreement
         
         breakdown_str = ' | '.join(breakdown)
@@ -1298,11 +1429,16 @@ def main():
     # Get data and create features
     raw_df = fetch_bitcoin_data(num_points=24000, interval_minutes=1)
     print(f"📊 Fetched {len(raw_df)} data points of Bitcoin data at 1-minute intervals")
-    
-    best_label = evaluate_threshold_horizon_grid(raw_df)
-    selected_threshold = best_label['threshold']
-    selected_horizon = best_label['horizon']
-    move_label = f"{selected_threshold * 100:.2f}%"
+
+    # Hardcoded label spec -- the auto-search (evaluate_threshold_horizon_grid)
+    # is bypassed. Use the values from config.prediction_spec.PCT_THRESHOLD and
+    # HORIZON_MINUTES directly. To re-enable auto-search, uncomment the next two
+    # lines and delete the 'selected_threshold' / 'selected_horizon' assignments below.
+    # best_label = evaluate_threshold_horizon_grid(raw_df)
+    # selected_threshold = best_label['threshold']; selected_horizon = best_label['horizon']
+    selected_threshold = PCT_THRESHOLD
+    selected_horizon = HORIZON_MINUTES
+    move_label = f"{selected_threshold * 100:.3f}%"
 
     df = create_enhanced_features(raw_df, pct_threshold=selected_threshold, horizon_steps=selected_horizon)
     print(f"⚙️  Created {len(df.columns)-3} technical features")  # -3 for date, price, target
@@ -1497,6 +1633,39 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
     print_baseline_report(y_train, y_test)
     
+    # --- Fast path: serve a cached state from a previous run ---------------------
+    # To enable: set the environment variable FAST_PATH_MODEL_STATE=1. The cached
+    # state is honoured only when it is younger than MAX_STATE_AGE_HOURS (default 0.5 h).
+    # On any failure (missing file, schema mismatch, too-old state, decode error, or
+    # feature-set mismatch with the current dataset) the fast path is bypassed silently
+    # and the normal scaler-evaluation path runs -- it never blocks a prediction.
+    if os.environ.get("FAST_PATH_MODEL_STATE", "").lower() in ("1", "true", "yes"):
+        try:
+            import datetime as _dt_fp
+            from services.model_state import load_state as _load_state, ModelStateError as _fp_ModelStateError
+            max_age_hours = float(os.environ.get("MAX_STATE_AGE_HOURS", "0.5"))
+            _state = _load_state()
+            _age_s = (_dt_fp.datetime.now(_dt_fp.timezone.utc) - _state.saved_at).total_seconds()
+            if _age_s > max_age_hours * 3600:
+                raise RuntimeError(f"cached state is {_age_s/3600:.2f}h old (> {max_age_hours}h)")
+            _feature_cols = list(_state.feature_cols)
+            _missing = [c for c in _feature_cols if c not in df.columns]
+            if _missing:
+                raise RuntimeError(f"cached state expects {len(_missing)} feature(s) missing from current data: {_missing[:5]}")
+            _X_latest = df[_feature_cols].iloc[[-1]]
+            _y_proba = _state.ensemble.predict_proba(_X_latest)[0]
+            _y_pred = int(np.argmax(_y_proba)) - 1   # classes were [-1, 0, 1] -> probs order matches
+            _conf = float(np.max(_y_proba))
+            print(f"   ⚡ Fast-path predict (cache {_age_s:.1f}s old, schema v{_state.schema_version}): direction={_y_pred:+d}  confidence={_conf:.2%}")
+            print(f"   📦 Reused ensemble: {_state.ensemble.__class__.__name__}, booster: {_state.booster.__class__.__name__}, scalers: {len(list(_state.scaler_results))}")
+            # Note: we deliberately do NOT save again here (no fresh training happened).
+            # The cached state remains valid; the next normal run will refresh it.
+            return
+        except (FileNotFoundError, _fp_ModelStateError, RuntimeError) as _fp_exc:
+            print(f"   ⏩  Fast path unavailable ({_fp_exc}); falling back to fresh training.")
+        except Exception as _fp_exc:
+            print(f"   ⏩  Fast path error ({type(_fp_exc).__name__}: {_fp_exc}); falling back to fresh training.")
+
     # --- Scaler Evaluation & Multi-Scaler Ensemble Confidence Booster ---
     print("\n🔍 Evaluating 5 scalers for optimal feature preprocessing...")
     scaler_results = ScalerEvaluator.evaluate(X_train, y_train, cv=3)
@@ -1568,12 +1737,34 @@ def main():
         class_weight='balanced', random_state=42, n_jobs=-1
     )
     
-    # Ensemble voting classifier
+    # Ensemble voting classifier.
+    #
+    # sklearn's VotingClassifier.fit() forwards `sample_weight` (and
+    # `fit_params` generally) to each underlying estimator's .fit(). cuML
+    # estimators (cuml.ensemble.RandomForestClassifier,
+    # cuml.linear_model.LogisticRegression) raise TypeError when
+    # sample_weight is passed, which sklearn then re-raises as
+    # 'Underlying estimator <Name> does not support sample weights.' -- see
+    # sklearn/ensemble/_base.py:_fit_single_estimator. Both the walk-forward
+    # CV (walk_forward_scores) and the calibration (fit_calibrated_classifier)
+    # pass sample_weight=, so we swap in sklearn-only equivalents for those
+    # two sub-estimators. The cuML `rf` and `lr_scaled_pipe` remain in scope
+    # above for any standalone use later in this module.
+    _ensemble_rf = RandomForestClassifier(
+        n_estimators=200, max_depth=15, min_samples_split=5,
+        class_weight='balanced', random_state=42, n_jobs=-1,
+    )
+    _ensemble_lr_scaled_pipe = Pipeline([
+        ('scaler', _cpu_scaler_by_name('StandardScaler')),
+        ('lr', LogisticRegression(
+            max_iter=2000, class_weight='balanced', random_state=42,
+        )),
+    ])
     ensemble = VotingClassifier([
-        ('rf', rf),
-        ('gb', gb), 
+        ('rf', _ensemble_rf),
+        ('gb', gb),
         ('gb_minmax', gb_minmax_pipe),
-        ('lr_scaled', lr_scaled_pipe),
+        ('lr_scaled', _ensemble_lr_scaled_pipe),
         ('svm', svm_pipe),
         ('et', et)
     ], voting='soft')
@@ -1660,6 +1851,26 @@ def main():
     print(f"   📊 Dataset: {len(X_train)} train + {len(X_test)} test samples")
     print(f"   🤖 Ensemble: 6 algorithms (RF, GB, GB-MinMax, LR-Scaled, SVM, ExtraTrees)")
     print(f"   📈 Features: {len(feature_cols)} technical indicators")
+
+    # --- Persist fitted state to disk so the next run can short-circuit predict. ---
+    # Errors here must NEVER break the prediction run -- the state cache is a nice-to-have,
+    # not a requirement. The whole block is wrapped in a try/except that logs and continues.
+    try:
+        from services.model_state import save_state as _save_state
+        _modstate_path = _save_state(
+            ensemble=ensemble,
+            booster=booster,
+            scaler_results=scaler_results,
+            feature_cols=feature_cols,
+            cv_mean=float(cv_scores.mean()),
+            accuracy=float(accuracy),
+            metadata={"trigger": "main-end"},
+        )
+        print(f"   💾 Model state saved to {_modstate_path}")
+    except Exception as _modstate_exc:
+        # Never let a state-cache failure block a prediction. One-line log only.
+        print(f"   ⚠️  Model state save skipped: {type(_modstate_exc).__name__}: {_modstate_exc}")
+
 
 if __name__ == "__main__":
     main()
