@@ -159,6 +159,14 @@ def walk_forward_scores(estimator, X, y, desired_splits=5, scoring='accuracy'):
 
 def fit_calibrated_classifier(estimator, X_train, y_train, desired_splits=3):
     """Fit calibrated probabilities, falling back to the raw model when folds are sparse."""
+    from class_balancing import resampling_enabled, fit_resampled_calibrated
+    if resampling_enabled():
+        if len(np.unique(y_train)) < 2:
+            return _fit_with_balanced_sample_weight(estimator, X_train, y_train)
+        return fit_resampled_calibrated(
+            estimator, X_train, y_train,
+            make_time_series_split(len(X_train), desired_splits=desired_splits),
+        )
     if len(np.unique(y_train)) < 2:
         estimator = _fit_with_balanced_sample_weight(estimator, X_train, y_train)
         return estimator
@@ -832,7 +840,7 @@ def _detect_estimator_backend(estimator):
 
 
 def _fit_with_balanced_sample_weight(estimator, X, y, **fit_kwargs):
-    """Fit `estimator` with sklearn's 'balanced' class_weight expressed as sample_weight.
+    """Fit with fold-local oversampling or the legacy balanced sample-weight method.
 
     Replaces the constructor-level `class_weight='balanced'` kwarg that cuML does
     not accept on __init__. Computes per-sample weights so each class contributes
@@ -858,6 +866,11 @@ def _fit_with_balanced_sample_weight(estimator, X, y, **fit_kwargs):
 
     Returns the fitted estimator, which may be a weighted CPU forest fallback.
     """
+    from class_balancing import resampling_enabled, resampled_classifier
+    if resampling_enabled():
+        if fit_kwargs:
+            raise ValueError('Resampled training does not accept external fit weights or parameters')
+        return resampled_classifier(estimator).fit(X, y)
     try:
         from sklearn.utils.class_weight import compute_sample_weight as _csw
         sw = _csw('balanced', y)
@@ -1073,7 +1086,7 @@ class ScalerEvaluator:
     
     @staticmethod
     def evaluate(X_train, y_train, cv=3):
-        """Rank scalers by average cross-validation accuracy.
+        """Rank scalers by average walk-forward balanced accuracy.
         
         Returns:
             list: [(scaler_name, avg_cv_score, scaler_object), ...] sorted descending by score
@@ -1081,7 +1094,7 @@ class ScalerEvaluator:
         results = []
         splitter = make_time_series_split(len(X_train), desired_splits=cv)
 
-        # Use sklearn pipelines for evaluation so scaling is fitted inside each CV fold.
+        # Fit scaling and any class resampling inside each CV training fold.
         scaler_names = ['StandardScaler', 'MinMaxScaler', 'RobustScaler', 'PowerTransformer', 'QuantileTransformer']
         for name in scaler_names:
             scored = None  # (avg_score, fitted_scaler_instance) on success
@@ -1093,7 +1106,10 @@ class ScalerEvaluator:
                     ('scaler', scaler),
                     ('rf', rf)
                 ])
-                scores = cross_val_score(candidate, X_train, y_train, cv=splitter, scoring='accuracy')
+                from class_balancing import resampling_enabled, resampled_classifier
+                if resampling_enabled():
+                    candidate = resampled_classifier(candidate)
+                scores = cross_val_score(candidate, X_train, y_train, cv=splitter, scoring='balanced_accuracy')
                 avg_score = float(scores.mean())
                 if np.isnan(avg_score):
                     raise ValueError("cross_val_score returned NaN")
@@ -1110,7 +1126,10 @@ class ScalerEvaluator:
                         ('scaler', scaler),
                         ('rf', rf),
                     ])
-                    scores = cross_val_score(candidate, X_train, y_train, cv=splitter, scoring='accuracy')
+                    from class_balancing import resampling_enabled, resampled_classifier
+                    if resampling_enabled():
+                        candidate = resampled_classifier(candidate)
+                    scores = cross_val_score(candidate, X_train, y_train, cv=splitter, scoring='balanced_accuracy')
                     avg_score = float(scores.mean())
                     if np.isnan(avg_score):
                         raise ValueError("cross_val_score returned NaN")
@@ -1181,7 +1200,7 @@ class EnsembleConfidenceBooster:
                 n_estimators=80, learning_rate=0.1, max_depth=6,
                 random_state=random_state
             )
-            gb.fit(X_scaled, y_train)
+            gb = _fit_with_balanced_sample_weight(gb, X_scaled, y_train)
             self.models[scaler_name]['gb'] = (gb, scaler)
 
     def _as_feature_frame(self, X_test_latest):
@@ -1309,6 +1328,10 @@ def main():
     else:
         print("🧰 Backend: CPU fallback active (CUDA/cuML unavailable)")
     
+    from class_balancing import balancing_mode, feature_importances
+    _class_balancing = balancing_mode()
+    print(f"Class balancing for fresh training: {_class_balancing}")
+
     # Get data and create features
     raw_df = fetch_bitcoin_data(num_points=NUM_DATA_POINTS, interval_minutes=BAR_MINUTES)
     # Coinbase candle timestamps are OPEN times; exclude unfinished input bars.
@@ -1541,6 +1564,10 @@ def main():
             if _missing:
                 raise RuntimeError(f"cached state expects {len(_missing)} feature(s) missing from current data: {_missing[:5]}")
             _X_latest = live_df[_feature_cols].iloc[[-1]]
+            _cached_balancing = _state.metadata.get('class_balancing', 'sample-weight')
+            print(f"Cached classifier balancing: {_cached_balancing}")
+            if _cached_balancing != _class_balancing:
+                print('Balancing setting changed; cache remains valid. Set FAST_PATH_MODEL_STATE=0 to train the new method.')
             _identity = model_identity('classifier', _state.saved_at, cached=True)
             _identity.update(_state.metadata.get('history_identity', {}))
             _identity['cached'] = True
@@ -1650,16 +1677,16 @@ def main():
         ('et', et)
     ], voting='soft')
     
-    cv_scores = walk_forward_scores(clone(ensemble), X_train, y_train, desired_splits=5, scoring='accuracy')
+    cv_scores = walk_forward_scores(clone(ensemble), X_train, y_train, desired_splits=5, scoring='balanced_accuracy')
     print(f"\n🔄 Walk-Forward Cross-Validation:")
-    print(f"   Mean CV Accuracy: {cv_scores.mean():.3f} (±{cv_scores.std()*2:.3f})")
+    print(f"   Mean CV Balanced Accuracy: {cv_scores.mean():.3f} (±{cv_scores.std()*2:.3f})")
 
     # Train calibrated ensemble
     ensemble = fit_calibrated_classifier(ensemble, X_train, y_train, desired_splits=3)
     
     # Predictions
     _training_cutoff = pd.to_datetime(df.iloc[len(X_train) - 1]['date'], utc=True) + pd.Timedelta(minutes=BAR_MINUTES + selected_horizon)
-    _identity = model_identity('classifier', pd.Timestamp.now(tz='UTC'), _training_cutoff)
+    _identity = model_identity('classifier:' + _class_balancing, pd.Timestamp.now(tz='UTC'), _training_cutoff)
     _live_direction, _live_confidence = history.classifier(
         ensemble, live_df[feature_cols].iloc[[-1]], live_df.iloc[-1],
         selected_horizon, selected_threshold, _identity,
@@ -1679,6 +1706,9 @@ def main():
     
     # Performance evaluation
     accuracy = accuracy_score(y_test, y_pred)
+    from sklearn.metrics import balanced_accuracy_score, f1_score
+    print(f"   Held-out balanced accuracy: {balanced_accuracy_score(y_test, y_pred):.3f}")
+    print(f"   Held-out macro F1: {f1_score(y_test, y_pred, average='macro', zero_division=0):.3f}")
     print(f"\n📊 Model Performance:")
     print(f"   Accuracy: {accuracy:.3f}")
     
@@ -1693,7 +1723,7 @@ def main():
     rf = _fit_with_balanced_sample_weight(rf, X_train, y_train)
     feature_importance = pd.DataFrame({
         'feature': feature_cols,
-        'importance': rf.feature_importances_
+        'importance': feature_importances(rf)
     }).sort_values('importance', ascending=False)
     
     print(f"\n🔥 Top 10 Most Important Features:")
@@ -1777,7 +1807,7 @@ def main():
             feature_cols=feature_cols,
             cv_mean=float(cv_scores.mean()),
             accuracy=float(accuracy),
-            metadata={"trigger": "main-end", "history_identity": _identity},
+            metadata={"trigger": "main-end", "history_identity": _identity, "class_balancing": _class_balancing, "cv_metric": "balanced_accuracy"},
         )
         print(f"   💾 Model state saved to {_modstate_path}")
     except Exception as _modstate_exc:

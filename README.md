@@ -203,6 +203,34 @@ system = ContinuousTrainingSystem(update_interval=120)
 sentiment = forecaster.analyze_market_sentiment(data, window_hours=4)
 ```
 
+## Class imbalance experiment
+
+Fresh classifier training defaults to `imbalanced-learn` random oversampling.
+Install the updated requirements in the model's Python environment. The sampler
+duplicates minority-class observations only inside each training fold; validation,
+held-out data, and calibration class frequencies remain unchanged. Resampled models
+have constructor class weights disabled and receive no balanced sample weights.
+This applies to scaler evaluation, the direction ensemble, and confidence-booster
+classifiers. The continuous price regressors keep their existing training method.
+
+WSL/bash commands, after syncing the updated code:
+
+```bash
+python -m pip install -r requirements.txt
+CLASS_BALANCING=random-over FAST_PATH_MODEL_STATE=0 python enhanced_prediction.py
+
+# Compare against the previous weighting method on a fresh run
+CLASS_BALANCING=sample-weight FAST_PATH_MODEL_STATE=0 python enhanced_prediction.py
+```
+
+The same options apply to `priceprediction.py`. Compare held-out balanced accuracy,
+macro F1, and per-class precision/recall, then evaluate forward results in prediction
+history. Oversampling is an experiment; an accuracy improvement is not assumed.
+Each saved classifier records its balancing method. Fast-path runs retain the
+72-hour cache policy and report the cached model's method; changing
+`CLASS_BALANCING` does not silently retrain an otherwise valid cache. A fresh run
+replaces the existing classifier cache, so comparisons do not maintain two caches.
+
 ## Prediction history and accuracy
 
 Both `enhanced_prediction.py` and `priceprediction.py` automatically save their
