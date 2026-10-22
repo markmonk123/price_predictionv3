@@ -26,25 +26,34 @@ _cuml_MinMaxScaler = None
 _cuml_RobustScaler = None
 _cuml_LinearRegression = None
 XGBOOST_AVAILABLE = False
+# CUDA availability is independent of which optional cuML components exist.
 try:
-    import cuml
-    from cuml.ensemble import RandomForestRegressor as _cuRFReg
-    from cuml.ensemble import GradientBoostingRegressor as _cuGBReg
-    import cuml.preprocessing as _cuml_prep_reg
-    from cuml.linear_model import LinearRegression as _cuLinReg
     import cupy as cp_reg
     _gpu_count = cp_reg.cuda.runtime.getDeviceCount()
-    if _gpu_count > 0:
-        CUDA_AVAILABLE = True
-        cuml.set_global_output_type('numpy')
-        _cuml_RF_reg = _cuRFReg
-        _cuml_GB_reg = _cuGBReg
-        _cuml_StandardScaler = _cuml_prep_reg.StandardScaler
-        _cuml_MinMaxScaler = _cuml_prep_reg.MinMaxScaler
-        _cuml_RobustScaler = _cuml_prep_reg.RobustScaler
-        _cuml_LinearRegression = _cuLinReg
+    CUDA_AVAILABLE = _gpu_count > 0
 except Exception:
     pass
+
+if CUDA_AVAILABLE:
+    try:
+        import cuml
+        cuml.set_global_output_type('numpy')
+    except Exception:
+        pass
+
+    def _optional_cuml_component(module, name):
+        from importlib import import_module
+        try:
+            return getattr(import_module(module), name)
+        except Exception:
+            return None
+
+    _cuml_RF_reg = _optional_cuml_component('cuml.ensemble', 'RandomForestRegressor')
+    _cuml_GB_reg = _optional_cuml_component('cuml.ensemble', 'GradientBoostingRegressor')
+    _cuml_StandardScaler = _optional_cuml_component('cuml.preprocessing', 'StandardScaler')
+    _cuml_MinMaxScaler = _optional_cuml_component('cuml.preprocessing', 'MinMaxScaler')
+    _cuml_RobustScaler = _optional_cuml_component('cuml.preprocessing', 'RobustScaler')
+    _cuml_LinearRegression = _optional_cuml_component('cuml.linear_model', 'LinearRegression')
 
 try:
     import xgboost as xgb
@@ -297,9 +306,9 @@ class EnhancedBitcoinForecaster:
             try:
                 print(f"   🔄 Training {name}...", end=' ')
                 model = model_factory()  # invoke thunk -> estimator
+                model.fit(X_train, y_train)
                 backend = EnhancedBitcoinForecaster._detect_estimator_backend(model)
                 backend_marker = "GPU" if backend in ('cuML', 'xgboost') else "CPU"
-                model.fit(X_train, y_train)
                 y_pred = model.predict(X_test)
                 mse = mean_squared_error(y_test, y_pred)
                 mae = mean_absolute_error(y_test, y_pred)
@@ -506,12 +515,35 @@ class EnhancedBitcoinForecaster:
 
     @staticmethod
     def _detect_estimator_backend(estimator):
-        """Return cuML, xgboost, or sklearn based on the estimator module name."""
+        """Identify the prediction backend, looking through sklearn wrappers.
+
+        The xgboost marker denotes CUDA execution; CPU XGBoost uses the CPU
+        marker (sklearn) to preserve the existing backend-label interface.
+        """
+        if isinstance(estimator, Pipeline):
+            return EnhancedBitcoinForecaster._detect_estimator_backend(estimator.steps[-1][1])
+        if isinstance(estimator, MultiOutputRegressor):
+            fitted = getattr(estimator, 'estimators_', None)
+            inner = fitted[0] if fitted else estimator.estimator
+            return EnhancedBitcoinForecaster._detect_estimator_backend(inner)
         mod = type(estimator).__module__ or ""
         if mod.startswith("cuml"):
             return "cuML"
         if mod.startswith("xgboost"):
-            return "xgboost"
+            params = estimator.get_params()
+            device = str(params.get('device') or 'cpu')
+            # A fitted booster may have fallen back to CPU despite device=cuda.
+            try:
+                import json
+                config = json.loads(estimator.get_booster().save_config())
+                device = config['learner']['generic_param']['device']
+            except (AttributeError, KeyError, ValueError):
+                pass
+            gpu = device.startswith(('cuda', 'gpu')) or (
+                device == 'cpu' and params.get('device') is None
+                and params.get('tree_method') == 'gpu_hist'
+            )
+            return "xgboost" if gpu else "sklearn"
         if mod.startswith("sklearn"):
             return "sklearn"
         return mod or "unknown"
