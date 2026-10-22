@@ -19,7 +19,7 @@ try:
     import numpy as np
     import pandas as pd
     import requests
-    from enhanced_prediction import create_enhanced_features, main
+    from enhanced_prediction import create_enhanced_features, horizon_to_steps, main
     from sklearn.ensemble import RandomForestClassifier
 except ImportError as e:
     print(json.dumps({"error": f"Import error: {str(e)}", "errorType": "ImportError"}))
@@ -29,6 +29,8 @@ try:
     from config.prediction_spec import (
         HORIZON_MINUTES,
         PCT_THRESHOLD,
+        BAR_MINUTES,
+        NUM_DATA_POINTS,
         TIMEFRAME_LABEL,
         spec_summary,
     )
@@ -41,15 +43,20 @@ def parse_arguments():
     parser.add_argument('--price', type=float, required=True, help='Current Bitcoin price')
     parser.add_argument('--volume', type=float, required=False, default=100.0, help='Current trading volume')
     parser.add_argument('--time', type=str, required=False, default=None, help='Current timestamp (ISO format)')
-    parser.add_argument('--window', type=int, required=False, default=60, help='Historical data window size')
+    parser.add_argument('--window', type=int, required=False, default=NUM_DATA_POINTS,
+                        help='Historical candle count to fetch (5-minute bars)')
     parser.add_argument('--allow-synthetic', action='store_true',
                         help='Allow synthetic fallback if live market history fetch fails')
     return parser.parse_args()
 
 
-def fetch_recent_market_data(current_price, volume, timestamp, window_size=60):
+def fetch_recent_market_data(current_price, volume, timestamp, window_size=NUM_DATA_POINTS):
     """
-    Fetch recent 1-minute BTC-USD candles from Coinbase.
+    Fetch recent BTC-USD candles from Coinbase at the spec bar size.
+
+    Coinbase caps every /candles response at 300 rows, so reaching the full
+    window requires paginating backwards in 300-bar pages until we either hit
+    the requested window size or the API runs out of older data.
     """
     if timestamp is None:
         timestamp = datetime.datetime.utcnow()
@@ -58,21 +65,49 @@ def fetch_recent_market_data(current_price, volume, timestamp, window_size=60):
 
     # Coinbase candle endpoint returns [time, low, high, open, close, volume]
     url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
-    start_time = timestamp - datetime.timedelta(minutes=max(window_size + 5, 65))
-    params = {
-        "granularity": 60,
-        "start": start_time.isoformat(),
-        "end": timestamp.isoformat()
-    }
+    points_per_request = 300
+    num_requests = (window_size + points_per_request - 1) // points_per_request
+    end_time = timestamp
+    all_candles = []
 
-    response = requests.get(url, params=params, timeout=10)
-    response.raise_for_status()
-    candles = response.json()
+    for _ in range(num_requests):
+        start_time = end_time - datetime.timedelta(
+            minutes=points_per_request * BAR_MINUTES)
 
-    if not candles:
+        params = {
+            "granularity": BAR_MINUTES * 60,
+            "start": start_time.isoformat(),
+            "end": end_time.isoformat()
+        }
+
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        page = response.json()
+
+        if not page:
+            break
+
+        all_candles.extend(page)
+
+        # Coinbase returns each page newest-first, so the LAST row is the
+        # oldest candle on the page: step the window back past it.
+        oldest_timestamp = min(c[0] for c in page)
+        next_end = datetime.datetime.utcfromtimestamp(oldest_timestamp)
+        if next_end >= end_time:
+            # No forward progress (API clamped the range); stop to avoid looping.
+            break
+        end_time = next_end - datetime.timedelta(seconds=1)
+
+        if len(all_candles) >= window_size:
+            break
+
+    if not all_candles:
         raise ValueError("No candles returned from Coinbase API")
 
-    candles = sorted(candles, key=lambda x: x[0])[-window_size:]
+    # De-duplicate overlapping boundary candles, then order oldest -> newest.
+    by_time = {c[0]: c for c in all_candles}
+    candles = sorted(by_time.values(), key=lambda x: x[0])[-window_size:]
+
     if len(candles) < max(10, window_size // 3):
         raise ValueError(f"Insufficient candle history returned ({len(candles)} rows)")
 
@@ -88,7 +123,7 @@ def fetch_recent_market_data(current_price, volume, timestamp, window_size=60):
 
     return df
 
-def generate_synthetic_data(current_price, volume, timestamp, window_size=60):
+def generate_synthetic_data(current_price, volume, timestamp, window_size=NUM_DATA_POINTS):
     """
     Generate synthetic price data to feed into the model
     """
@@ -125,7 +160,7 @@ def generate_synthetic_data(current_price, volume, timestamp, window_size=60):
 
     return df
 
-def run_prediction(price, volume, timestamp=None, window_size=60, allow_synthetic=False):
+def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, allow_synthetic=False):
     """
     Run the Bitcoin prediction model and return results
     """
@@ -144,7 +179,7 @@ def run_prediction(price, volume, timestamp=None, window_size=60, allow_syntheti
         enhanced_df = create_enhanced_features(
             df,
             pct_threshold=PCT_THRESHOLD,
-            horizon_steps=HORIZON_MINUTES,
+            horizon_steps=horizon_to_steps(HORIZON_MINUTES),
         )
 
         # Select features (excluding target variables and non-predictive columns)

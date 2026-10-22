@@ -33,6 +33,8 @@ try:
     from config.prediction_spec import (
         HORIZON_MINUTES,
         PCT_THRESHOLD,
+        BAR_MINUTES,
+        NUM_DATA_POINTS,
         TIMEFRAME_LABEL,
         HORIZON_GRID_MINUTES,
         THRESHOLD_GRID,
@@ -41,10 +43,12 @@ try:
     )
 except Exception:  # pragma: no cover
     HORIZON_MINUTES = 15
-    PCT_THRESHOLD = 0.001   # match config.prediction_spec.py (per SOP D5/F4)
+    PCT_THRESHOLD = 0.015   # match config.prediction_spec.py (per SOP D5/F4)
+    BAR_MINUTES = 5
+    NUM_DATA_POINTS = 11000
     TIMEFRAME_LABEL = '15 minutes'
-    HORIZON_GRID_MINUTES = (5, 15, 30, 60)
-    THRESHOLD_GRID = (0.003, 0.005, 0.008)
+    HORIZON_GRID_MINUTES = (3, 6, 12, 24)
+    THRESHOLD_GRID = (0.010, 0.015, 0.020)
     HORIZON_HOURS = 12
     spec_summary = lambda: f'horizon={HORIZON_MINUTES}m, threshold=Â±{PCT_THRESHOLD*100:.1f}%'
     # NOTE: do NOT reassign the sklearn names (StandardScaler, Pipeline, clone, etc.)
@@ -295,9 +299,45 @@ def display_forecast_windows(price_df, horizon_hours=HORIZON_HOURS):
         print(f"\nâš ï¸ Failed to generate forecast windows: {e}")
         return False
 
-def create_enhanced_features(df, pct_threshold=PCT_THRESHOLD, horizon_steps=HORIZON_MINUTES):
-    """Create comprehensive technical indicators for Bitcoin 1-minute interval prediction.
+def detect_bar_minutes(df, default=BAR_MINUTES):
+    """Infer the candle size (in minutes) from the 'date' column.
+
+    Uses the median spacing between consecutive timestamps, which is robust to
+    missing bars and market closures (unlike mean or the first gap). Falls back
+    to the spec default when the index is too short or unparseable.
+    """
+    try:
+        if df is None or len(df) < 3 or 'date' not in df.columns:
+            return int(default)
+        deltas = pd.to_datetime(df['date']).diff().dropna()
+        deltas = deltas[deltas > pd.Timedelta(0)]
+        if deltas.empty:
+            return int(default)
+        minutes = float(deltas.dt.total_seconds().median() / 60.0)
+        # Snap to a sane candle size; Coinbase supports 1/5/15/60-minute bars.
+        allowed = (1, 5, 15, 60)
+        return int(min(allowed, key=lambda a: abs(a - minutes)))
+    except Exception:
+        return int(default)
+
+
+def horizon_to_steps(horizon_minutes, bar_minutes=BAR_MINUTES):
+    """Convert a horizon expressed in MINUTES into a whole number of BARS.
+
+    The feature/target pipeline shifts prices by a bar count, so every
+    minute-denominated horizon must be converted before it is passed in.
+    """
+    return max(int(round(float(horizon_minutes) / float(bar_minutes))), 1)
+
+
+def create_enhanced_features(df, pct_threshold=PCT_THRESHOLD, horizon_steps=HORIZON_MINUTES, bar_minutes=None):
+    """Create comprehensive technical indicators for Bitcoin interval prediction.
     Requires numpy, pandas, and scipy.stats. Raises ImportError if unavailable.
+
+    `bar_minutes` is the candle size. It is auto-detected from the timestamps when
+    not supplied, and is used to convert the minute-based lag/MA windows below
+    into bar counts, so "30m", "1h", "1d", "1w" keep their real meaning at any
+    granularity. `horizon_steps` is a BAR count, not minutes.
     """
     if pd is None or np is None or stats is None:
         raise ImportError("create_enhanced_features requires numpy, pandas, and scipy to be installed.")
@@ -310,16 +350,32 @@ def create_enhanced_features(df, pct_threshold=PCT_THRESHOLD, horizon_steps=HORI
     df['minute'] = df['date'].dt.minute
     df['is_weekend'] = (df['dayofweek'] >= 5).astype(int)
     
-    # Number of 1-min intervals in a day
-    intervals_in_day = 24 * 60
-    
-    # Price lags and returns (scaled for 1-min intervals)
-    for lag in [1, 5, 15, 30, 60, intervals_in_day]:  # 1m, 5m, 15m, 30m, 1h, 1d
+    # Candle size in minutes. Auto-detect from timestamps so callers that pass
+    # 5-minute candles don't silently get 5x-too-long feature windows.
+    if bar_minutes is None:
+        bar_minutes = detect_bar_minutes(df)
+    bar_minutes = max(int(bar_minutes), 1)
+    if bar_minutes != BAR_MINUTES:
+        print(f"   [features] bar size = {bar_minutes}m (spec default {BAR_MINUTES}m); "
+              f"windows converted from minutes to bars")
+
+    def bars(minutes):
+        """Convert a minute span into a whole number of bars (min 1)."""
+        return max(int(round(minutes / bar_minutes)), 1)
+
+    # Number of bars in a day / week
+    intervals_in_day = bars(24 * 60)
+    intervals_in_week = bars(7 * 24 * 60)
+
+    # Price lags and returns, specified in MINUTES then converted to bars
+    for lag_min in [1, 5, 15, 30, 60, 24 * 60]:  # 1m, 5m, 15m, 30m, 1h, 1d
+        lag = bars(lag_min)
         df[f'price_lag_{lag}'] = df['price'].shift(lag)
         df[f'return_{lag}'] = df['price'].pct_change(lag)
     
-    # Moving averages and ratios (scaled for 1-min intervals)
-    for window in [30, 60, 120, 360, intervals_in_day * 7]: # 30m, 1h, 2h, 6h, 1w
+    # Moving averages and ratios, specified in MINUTES then converted to bars
+    for window_min in [30, 60, 120, 360, 7 * 24 * 60]: # 30m, 1h, 2h, 6h, 1w
+        window = bars(window_min)
         df[f'sma_{window}'] = df['price'].rolling(window=window).mean()
         df[f'ema_{window}'] = df['price'].ewm(span=window).mean()
         df[f'price_sma_ratio_{window}'] = df['price'] / (df[f'sma_{window}'] + 1e-8)
@@ -359,8 +415,8 @@ def create_enhanced_features(df, pct_threshold=PCT_THRESHOLD, horizon_steps=HORI
     # Short-term volatility (10-period rolling std) used for next high/low window sizing
     df['sma_volatility_10'] = df['price'].rolling(window=10).std()
 
-    # Price momentum and slopes (scaled for 1-min)
-    for period in [30, 60, 120]: # 30m, 1h, 2h
+    # Price momentum and slopes (scaled by bar size)
+    for period in [bars(30), bars(60), bars(120)]: # 30m, 1h, 2h
         df[f'momentum_{period}'] = (df['price'] / (df['price'].shift(period) + 1e-8) - 1) * 100
         
         # Linear regression slope
@@ -379,16 +435,16 @@ def create_enhanced_features(df, pct_threshold=PCT_THRESHOLD, horizon_steps=HORI
     df['volume_proxy'] = df['price'].rolling(window=20).std()
     df['price_volume_trend'] = df['price'] * df['volume_proxy']
     
-    # Support/Resistance levels (scaled for 1-min)
-    for window in [60, 120, 240]: # 1h, 2h, 4h
+    # Support/Resistance levels (scaled by bar size)
+    for window in [bars(60), bars(120), bars(240)]: # 1h, 2h, 4h
         df[f'resistance_{window}'] = df['price'].rolling(window=window).max()
         df[f'support_{window}'] = df['price'].rolling(window=window).min()
         price_range = df[f'resistance_{window}'] - df[f'support_{window}']
         df[f'price_position_{window}'] = (df['price'] - df[f'support_{window}']) / (price_range + 1e-8)
     
-    # Trend indicators (scaled for 1-min)
-    df['price_trend_30'] = np.where(df['price'] > df['sma_30'], 1, 0)
-    df['price_trend_120'] = np.where(df['price'] > df['sma_120'], 1, 0)
+    # Trend names express minutes; SMA column names express bar counts.
+    df['price_trend_30'] = np.where(df['price'] > df[f'sma_{bars(30)}'], 1, 0)
+    df['price_trend_120'] = np.where(df['price'] > df[f'sma_{bars(120)}'], 1, 0)
     df['trend_strength'] = df['price_trend_30'] + df['price_trend_120']
 
     # DPO (Detrended Price Oscillator): price minus shifted SMA removes long-term trend
@@ -451,7 +507,11 @@ def evaluate_threshold_horizon_grid(raw_df, thresholds=None, horizons=None):
     for horizon in horizons:
         for threshold in thresholds:
             try:
-                candidate = create_enhanced_features(search_df, pct_threshold=threshold, horizon_steps=horizon)
+                candidate = create_enhanced_features(
+            search_df,
+            pct_threshold=threshold,
+            horizon_steps=horizon_to_steps(horizon),
+        )
                 feature_cols = [
                     col for col in candidate.columns
                     if col not in ['date', 'price', 'high', 'low', 'future_price', 'next_return', 'target', 'signal', 'bb_pct', 'macd', 'macd_signal']
@@ -508,7 +568,7 @@ def evaluate_threshold_horizon_grid(raw_df, thresholds=None, horizons=None):
     )
     return best
 
-def fetch_bitcoin_data(num_points=24000, interval_minutes=1):
+def fetch_bitcoin_data(num_points=NUM_DATA_POINTS, interval_minutes=BAR_MINUTES):
     """Fetch a specific number of Bitcoin price data points from Coinbase API.
     Fails hard on any error or if 'requests' is unavailable.
     Requires pandas and numpy when returning data.
@@ -1235,8 +1295,8 @@ def main():
         print("ðŸ§° Backend: CPU fallback active (CUDA/cuML unavailable)")
     
     # Get data and create features
-    raw_df = fetch_bitcoin_data(num_points=24000, interval_minutes=1)
-    print(f"ðŸ“Š Fetched {len(raw_df)} data points of Bitcoin data at 1-minute intervals")
+    raw_df = fetch_bitcoin_data(num_points=NUM_DATA_POINTS, interval_minutes=BAR_MINUTES)
+    print(f"ðŸ“Š Fetched {len(raw_df)} data points of Bitcoin data at {BAR_MINUTES}-minute intervals")
 
     # Hardcoded label spec -- the auto-search (evaluate_threshold_horizon_grid)
     # is bypassed. Use the values from config.prediction_spec.PCT_THRESHOLD and
@@ -1248,14 +1308,21 @@ def main():
     selected_horizon = HORIZON_MINUTES
     move_label = f"{selected_threshold * 100:.3f}%"
 
-    df = create_enhanced_features(raw_df, pct_threshold=selected_threshold, horizon_steps=selected_horizon)
+    df = create_enhanced_features(
+        raw_df,
+        pct_threshold=selected_threshold,
+        horizon_steps=horizon_to_steps(selected_horizon),
+    )
     print(f"âš™ï¸  Created {len(df.columns)-3} technical features")  # -3 for date, price, target
     print(f"ðŸŽ¯ Training label: next {selected_horizon} minute(s), move threshold Â±{move_label}")
+
+    lr_period = horizon_to_steps(30, bar_minutes=detect_bar_minutes(raw_df))
+    lr_col = f'lr_slope_{lr_period}'
 
     # --- Rule-Based LONG Signal: DPO > 0 AND LR Slope > 0 AND DI+ > DI- AND ADX >= 25 AND MACD Hist > 0 ---
     print("\nðŸ“¡ Rule-Based LONG Signal (DPO > 0 AND LR Slope > 0 AND DI+ > DI- AND ADX â‰¥ 25 AND MACD Hist > 0):")    
     try:
-        long_signals_rule = identify_long_signal(df, adx_threshold=25, lr_period=30)
+        long_signals_rule = identify_long_signal(df, adx_threshold=25, lr_period=lr_period)
         if not long_signals_rule.empty:
             latest = long_signals_rule.iloc[-1]
             hl_window = calculate_next_hl_window(latest)
@@ -1263,7 +1330,7 @@ def main():
             print(f"   Entry Price  : ${latest['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest['date'])}")
             print(f"   DPO          : {latest['dpo']:.4f}  (> 0 âœ“)")
-            print(f"   LR Slope(30) : {latest['lr_slope_30']:.6f}  (> 0 âœ“)")
+            print(f"   LR Slope(30) : {latest[lr_col]:.6f}  (> 0 âœ“)")
             print(f"   DI+          : {latest['di_plus']:.2f}  > DI- {latest['di_minus']:.2f}  (Strong âœ“)")
             print(f"   ADX          : {latest['adx']:.2f}  (â‰¥ 25 âœ“)")
             print(f"   MACD Hist    : {latest['macd_histogram']:.4f}  (> 0 âœ“)  MACD {latest['macd']:.4f} / Sig {latest['macd_signal']:.4f}")
@@ -1318,14 +1385,14 @@ def main():
     # --- Short Signal (LRS Variant): DI- > DI+, LR Slope < 0, ADX >= 25, MACD Hist < 0 ---
     print("\nðŸ“¡ SHORT Signal â€” LRS Divergence (DI- > DI+ AND LR Slope < 0 AND ADX â‰¥ 25 AND MACD Hist < 0):")
     try:
-        short_lrs_rule = identify_short_signal_lrs(df, adx_threshold=25, lr_period=30)
+        short_lrs_rule = identify_short_signal_lrs(df, adx_threshold=25, lr_period=lr_period)
         if not short_lrs_rule.empty:
             latest_sl = short_lrs_rule.iloc[-1]
             hl_window_sl = calculate_next_hl_window(latest_sl)
             print(f"   ðŸ”´ SHORT (LRS) Signal Detected!")
             print(f"   Entry Price  : ${latest_sl['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest_sl['date'])}")
-            print(f"   LR Slope(30) : {latest_sl['lr_slope_30']:.6f}  (< 0 âœ“)")
+            print(f"   LR Slope(30) : {latest_sl[lr_col]:.6f}  (< 0 âœ“)")
             print(f"   DI-          : {latest_sl['di_minus']:.2f}  > DI+ {latest_sl['di_plus']:.2f}  (Dominant âœ“)")
             print(f"   ADX          : {latest_sl['adx']:.2f}  (â‰¥ 25 âœ“)")
             print(f"   MACD Hist    : {latest_sl['macd_histogram']:.4f}  (< 0 âœ“)  MACD {latest_sl['macd']:.4f} / Sig {latest_sl['macd_signal']:.4f}")
@@ -1358,7 +1425,7 @@ def main():
             print(f"   DI+          : {latest_ld['di_plus']:.2f}  > DI- {latest_ld['di_minus']:.2f}  (Dominant âœ“)")
             print(f"   ADX          : {latest_ld['adx']:.2f}  (â‰¥ 25 âœ“)")
             print(f"   MACD Hist    : {latest_ld['macd_histogram']:.4f}  (> 0 âœ“)  MACD {latest_ld['macd']:.4f} / Sig {latest_ld['macd_signal']:.4f}")
-            print(f"   LR Slope(30) : {latest_ld['lr_slope_30']:.6f}  (not required â€” MACD fills momentum gap)")
+            print(f"   LR Slope(30) : {latest_ld[lr_col]:.6f}  (not required â€” MACD fills momentum gap)")
             print(f"   â”€â”€ Next High/Low Window (BB + Volatility) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€")
             print(f"   BB %B        : {hl_window_ld['bb_pct']:.1f}%  (position within bands)")
             print(f"   BB Upper     : ${latest_ld['bb_upper']:.2f}")
@@ -1376,14 +1443,14 @@ def main():
     # --- Long Signal (LRS Variant): DI+ > DI-, LR Slope > 0, ADX >= 25, MACD Hist > 0  [inverse of SHORT LRS] ---
     print("\nðŸ“¡ LONG Signal â€” LRS Divergence (DI+ > DI- AND LR Slope > 0 AND ADX â‰¥ 25 AND MACD Hist > 0):")
     try:
-        long_lrs_rule = identify_long_signal_lrs(df, adx_threshold=25, lr_period=30)
+        long_lrs_rule = identify_long_signal_lrs(df, adx_threshold=25, lr_period=lr_period)
         if not long_lrs_rule.empty:
             latest_ll = long_lrs_rule.iloc[-1]
             hl_window_ll = calculate_next_hl_window(latest_ll)
             print(f"   âœ… LONG (LRS) Signal Detected!")
             print(f"   Entry Price  : ${latest_ll['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest_ll['date'])}")
-            print(f"   LR Slope(30) : {latest_ll['lr_slope_30']:.6f}  (> 0 âœ“)")
+            print(f"   LR Slope(30) : {latest_ll[lr_col]:.6f}  (> 0 âœ“)")
             print(f"   DI+          : {latest_ll['di_plus']:.2f}  > DI- {latest_ll['di_minus']:.2f}  (Dominant âœ“)")
             print(f"   ADX          : {latest_ll['adx']:.2f}  (â‰¥ 25 âœ“)")
             print(f"   MACD Hist    : {latest_ll['macd_histogram']:.4f}  (> 0 âœ“)  MACD {latest_ll['macd']:.4f} / Sig {latest_ll['macd_signal']:.4f}")

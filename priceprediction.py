@@ -33,6 +33,8 @@ try:
     from config.prediction_spec import (
         HORIZON_MINUTES,
         PCT_THRESHOLD,
+        BAR_MINUTES,
+        NUM_DATA_POINTS,
         TIMEFRAME_LABEL,
         HORIZON_GRID_MINUTES,
         THRESHOLD_GRID,
@@ -41,10 +43,12 @@ try:
     )
 except Exception:  # pragma: no cover
     HORIZON_MINUTES = 15
-    PCT_THRESHOLD = 0.001   # match config.prediction_spec.py (per SOP D5/F4)
+    PCT_THRESHOLD = 0.015   # match config.prediction_spec.py (per SOP D5/F4)
+    BAR_MINUTES = 5
+    NUM_DATA_POINTS = 11000
     TIMEFRAME_LABEL = '15 minutes'
-    HORIZON_GRID_MINUTES = (5, 15, 30, 60)
-    THRESHOLD_GRID = (0.003, 0.005, 0.008)
+    HORIZON_GRID_MINUTES = (3, 6, 12, 24)
+    THRESHOLD_GRID = (0.010, 0.015, 0.020)
     HORIZON_HOURS = 12
     spec_summary = lambda: f'horizon={HORIZON_MINUTES}m, threshold=Ã‚Â±{PCT_THRESHOLD*100:.1f}%'
     # NOTE: do NOT reassign the sklearn names (StandardScaler, Pipeline, clone, etc.)
@@ -295,6 +299,37 @@ def display_forecast_windows(price_df, horizon_hours=HORIZON_HOURS):
         print(f"\nÃ¢Å¡Â Ã¯Â¸Â Failed to generate forecast windows: {e}")
         return False
 
+def detect_bar_minutes(df, default=BAR_MINUTES):
+    """Infer the candle size (in minutes) from the 'date' column.
+
+    Uses the median spacing between consecutive timestamps, which is robust to
+    missing bars and market closures (unlike mean or the first gap). Falls back
+    to the spec default when the index is too short or unparseable.
+    """
+    try:
+        if df is None or len(df) < 3 or 'date' not in df.columns:
+            return int(default)
+        deltas = pd.to_datetime(df['date']).diff().dropna()
+        deltas = deltas[deltas > pd.Timedelta(0)]
+        if deltas.empty:
+            return int(default)
+        minutes = float(deltas.dt.total_seconds().median() / 60.0)
+        # Snap to a sane candle size; Coinbase supports 1/5/15/60-minute bars.
+        allowed = (1, 5, 15, 60)
+        return int(min(allowed, key=lambda a: abs(a - minutes)))
+    except Exception:
+        return int(default)
+
+
+def horizon_to_steps(horizon_minutes, bar_minutes=BAR_MINUTES):
+    """Convert a horizon expressed in MINUTES into a whole number of BARS.
+
+    The feature/target pipeline shifts prices by a bar count, so every
+    minute-denominated horizon must be converted before it is passed in.
+    """
+    return max(int(round(float(horizon_minutes) / float(bar_minutes))), 1)
+
+
 def create_enhanced_features(df, pct_threshold=PCT_THRESHOLD, horizon_steps=HORIZON_MINUTES):
     """Create comprehensive technical indicators for Bitcoin 1-minute interval prediction.
     Requires numpy, pandas, and scipy.stats. Raises ImportError if unavailable.
@@ -451,7 +486,11 @@ def evaluate_threshold_horizon_grid(raw_df, thresholds=None, horizons=None):
     for horizon in horizons:
         for threshold in thresholds:
             try:
-                candidate = create_enhanced_features(search_df, pct_threshold=threshold, horizon_steps=horizon)
+                candidate = create_enhanced_features(
+            search_df,
+            pct_threshold=threshold,
+            horizon_steps=horizon_to_steps(horizon),
+        )
                 feature_cols = [
                     col for col in candidate.columns
                     if col not in ['date', 'price', 'high', 'low', 'future_price', 'next_return', 'target', 'signal', 'bb_pct', 'macd', 'macd_signal']
@@ -508,7 +547,7 @@ def evaluate_threshold_horizon_grid(raw_df, thresholds=None, horizons=None):
     )
     return best
 
-def fetch_bitcoin_data(num_points=24000, interval_minutes=1):
+def fetch_bitcoin_data(num_points=NUM_DATA_POINTS, interval_minutes=BAR_MINUTES):
     """Fetch a specific number of Bitcoin price data points from Coinbase API.
     Fails hard on any error or if 'requests' is unavailable.
     Requires pandas and numpy when returning data.
@@ -1222,8 +1261,8 @@ def main():
         print("Ã°Å¸Â§Â° Backend: CPU fallback active (CUDA/cuML unavailable)")
     
     # Get data and create features
-    raw_df = fetch_bitcoin_data(num_points=24000, interval_minutes=1)
-    print(f"Ã°Å¸â€œÅ  Fetched {len(raw_df)} data points of Bitcoin data at 1-minute intervals")
+    raw_df = fetch_bitcoin_data(num_points=NUM_DATA_POINTS, interval_minutes=BAR_MINUTES)
+    print(f"Ã°Å¸â€œÅ  Fetched {len(raw_df)} data points of Bitcoin data at {BAR_MINUTES}-minute intervals")
 
     # Hardcoded label spec -- the auto-search (evaluate_threshold_horizon_grid)
     # is bypassed. Use the values from config.prediction_spec.PCT_THRESHOLD and
@@ -1235,7 +1274,11 @@ def main():
     selected_horizon = HORIZON_MINUTES
     move_label = f"{selected_threshold * 100:.3f}%"
 
-    df = create_enhanced_features(raw_df, pct_threshold=selected_threshold, horizon_steps=selected_horizon)
+    df = create_enhanced_features(
+        raw_df,
+        pct_threshold=selected_threshold,
+        horizon_steps=horizon_to_steps(selected_horizon),
+    )
     print(f"Ã¢Å¡â„¢Ã¯Â¸Â  Created {len(df.columns)-3} technical features")  # -3 for date, price, target
     print(f"Ã°Å¸Å½Â¯ Training label: next {selected_horizon} minute(s), move threshold Ã‚Â±{move_label}")
 

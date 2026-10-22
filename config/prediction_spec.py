@@ -15,7 +15,7 @@ from __future__ import annotations
 #          explicitly opting in via SHARED).
 # ---------------------------------------------------------------------------
 HORIZON_MINUTES: int = 15
-PCT_THRESHOLD: float = 0.001           # ±0.10% (per MODEL_ACCURACY_DIAGNOSIS_AND_SOP.md F4/D5)
+PCT_THRESHOLD: float = 0.015           # ±1.50% (raised from ±0.10% to reduce label noise)
 TIMEFRAME_LABEL: str = f"{HORIZON_MINUTES} minutes"
 
 # ---------------------------------------------------------------------------
@@ -25,24 +25,35 @@ TIMEFRAME_LABEL: str = f"{HORIZON_MINUTES} minutes"
 HORIZON_HOURS: int = 12
 
 # ---------------------------------------------------------------------------
+# Candle / bar-size spec
+# Used by: enhanced_prediction.py, priceprediction.py (fetch_bitcoin_data),
+#          create_enhanced_features (converts minute-based windows into bars).
+# ---------------------------------------------------------------------------
+BAR_MINUTES: int = 5                   # 5-minute candles
+NUM_DATA_POINTS: int = 11000           # 11000 x 5m bars ~= 38 days of history
+
+# ---------------------------------------------------------------------------
 # Walk-forward CV search grid (centered on the spec above)
 # Used by: enhanced_prediction.evaluate_threshold_horizon_grid.
 # ---------------------------------------------------------------------------
-HORIZON_GRID_MINUTES: tuple = (5, 15, 30, 60)
-THRESHOLD_GRID: tuple = (0.003, 0.005, 0.008)
+HORIZON_GRID_MINUTES: tuple = (3, 6, 12, 24)     # 15m/30m/1h/2h in 5m bars
+THRESHOLD_GRID: tuple = (0.010, 0.015, 0.020)
 
 
 def spec_summary() -> str:
     """Return a one-line human-readable spec for logs / error messages."""
     return (
+        f"bar={BAR_MINUTES}m, points={NUM_DATA_POINTS}, "
         f"horizon={HORIZON_MINUTES}m ({TIMEFRAME_LABEL}), "
-        f"threshold=±{PCT_THRESHOLD * 100:.1f}%, "
+        f"threshold=±{PCT_THRESHOLD * 100:.2f}%, "
         f"regression_horizon={HORIZON_HOURS}h"
     )
 
 
 __all__ = [
     "HORIZON_MINUTES",
+    "BAR_MINUTES",
+    "NUM_DATA_POINTS",
     "PCT_THRESHOLD",
     "TIMEFRAME_LABEL",
     "HORIZON_HOURS",
