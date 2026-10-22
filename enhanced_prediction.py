@@ -43,14 +43,14 @@ try:
     )
 except Exception:  # pragma: no cover
     HORIZON_MINUTES = 15
-    PCT_THRESHOLD = 0.015   # match config.prediction_spec.py (per SOP D5/F4)
+    PCT_THRESHOLD = 0.0015   # match config.prediction_spec.py (per SOP D5/F4)
     BAR_MINUTES = 5
     NUM_DATA_POINTS = 11000
     TIMEFRAME_LABEL = '15 minutes'
     HORIZON_GRID_MINUTES = (3, 6, 12, 24)
     THRESHOLD_GRID = (0.010, 0.015, 0.020)
     HORIZON_HOURS = 12
-    spec_summary = lambda: f'horizon={HORIZON_MINUTES}m, threshold=Â±{PCT_THRESHOLD*100:.1f}%'
+    spec_summary = lambda: f'horizon={HORIZON_MINUTES}m, threshold=±{PCT_THRESHOLD*100:.1f}%'
     # NOTE: do NOT reassign the sklearn names (StandardScaler, Pipeline, clone, etc.)
     # here. They were successfully imported earlier at module scope and must remain
     # bound to their real classes. The earlier chain assignment
@@ -61,14 +61,14 @@ except Exception:  # pragma: no cover
 # Defensive defaults: ensure the spec names referenced by function
 # default-argument expressions always exist, regardless of which branch
 # of the spec import above ran (success or fallback).
-PCT_THRESHOLD = globals().get('PCT_THRESHOLD', 0.005)
+PCT_THRESHOLD = globals().get('PCT_THRESHOLD', 0.0015)
 TIMEFRAME_LABEL = globals().get('TIMEFRAME_LABEL', f'{HORIZON_MINUTES} minutes')
 
 # ---------------------------------------------------------------------------
-# CUDA / cuML acceleration â€” auto-detected on WSL with an NVIDIA GPU.
+# CUDA / cuML acceleration — auto-detected on WSL with an NVIDIA GPU.
 # cuML provides GPU-accelerated drop-in replacements for sklearn estimators.
 # Falls back silently to sklearn CPU paths if CUDA / cuML is unavailable.
-# WSL requirement: NVIDIA driver â‰¥ 525 + CUDA toolkit visible inside WSL.
+# WSL requirement: NVIDIA driver ≥ 525 + CUDA toolkit visible inside WSL.
 # ---------------------------------------------------------------------------
 CUDA_AVAILABLE = False
 _gpu_count = 0
@@ -78,7 +78,7 @@ _cuml_StandardScaler = None
 _cuml_MinMaxScaler = None
 _cuml_RobustScaler = None
 try:
-    import cuml  # noqa: F401 â€” RAPIDS cuML
+    import cuml  # noqa: F401 — RAPIDS cuML
     from cuml.ensemble import RandomForestClassifier as _cuRF
     from cuml.linear_model import LogisticRegression as _cuLR
     import cuml.preprocessing as _cuml_prep
@@ -95,7 +95,7 @@ try:
         _cuml_MinMaxScaler = _cuml_prep.MinMaxScaler
         _cuml_RobustScaler = _cuml_prep.RobustScaler
 except Exception:
-    pass  # No CUDA / cuML available â€” silently continue with CPU sklearn
+    pass  # No CUDA / cuML available — silently continue with CPU sklearn
 
 try:
     from scipy import stats
@@ -145,7 +145,7 @@ def walk_forward_scores(estimator, X, y, desired_splits=5, scoring='accuracy'):
         if len(y_test_fold) == 0:
             continue  # nothing to score against
         est = clone(estimator)
-        _fit_with_balanced_sample_weight(est, X.iloc[train_idx], y_train_fold)
+        est = _fit_with_balanced_sample_weight(est, X.iloc[train_idx], y_train_fold)
         y_pred = est.predict(X.iloc[test_idx])
         if scoring == 'accuracy':
             from sklearn.metrics import accuracy_score as _acc
@@ -160,7 +160,7 @@ def walk_forward_scores(estimator, X, y, desired_splits=5, scoring='accuracy'):
 def fit_calibrated_classifier(estimator, X_train, y_train, desired_splits=3):
     """Fit calibrated probabilities, falling back to the raw model when folds are sparse."""
     if len(np.unique(y_train)) < 2:
-        _fit_with_balanced_sample_weight(estimator, X_train, y_train)
+        estimator = _fit_with_balanced_sample_weight(estimator, X_train, y_train)
         return estimator
 
     cv = make_time_series_split(len(X_train), desired_splits=desired_splits)
@@ -197,11 +197,11 @@ def fit_calibrated_classifier(estimator, X_train, y_train, desired_splits=3):
                 calibrated.fit(X_train, y_train)
                 return calibrated
             except Exception as exc:
-                print(f"   âš   Calibration skipped: {exc}")
+                print(f"   ⚠  Calibration skipped: {exc}")
                 estimator.fit(X_train, y_train)
                 return estimator
         except Exception as exc:
-            print(f"   âš   Calibration skipped: {exc}")
+            print(f"   ⚠  Calibration skipped: {exc}")
             estimator.fit(X_train, y_train)
             return estimator
 
@@ -219,7 +219,7 @@ def print_confidence_report(y_true, y_pred, confidence):
     y_pred = np.asarray(y_pred)
     confidence = np.asarray(confidence)
 
-    print("\nðŸŽšï¸  Confidence Calibration Check:")
+    print("\n🎚️  Confidence Calibration Check:")
     for low, high in [(0.0, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 1.01)]:
         mask = (confidence >= low) & (confidence < high)
         if mask.sum() == 0:
@@ -250,40 +250,40 @@ def display_forecast_windows(price_df, horizon_hours=HORIZON_HOURS):
     try:
         from enhanced_forecasting import EnhancedBitcoinForecaster
     except Exception as e:
-        print(f"\nâš ï¸ Forecast windows unavailable: {e}")
+        print(f"\n⚠️ Forecast windows unavailable: {e}")
         return False
 
     try:
         forecast_input = price_df[['date', 'price']].copy()
         current_price = pd.to_numeric(forecast_input['price'], errors='coerce').dropna().iloc[-1]
 
-        print("\nðŸ”® No high-confidence trade signal. Generating forecast windows instead...")
+        print("\n🔮 No high-confidence trade signal. Generating forecast windows instead...")
         forecaster = EnhancedBitcoinForecaster()
 
         if not forecaster.train_models(forecast_input, horizon_hours=horizon_hours):
-            print("âš ï¸ Forecast window generation failed during model training.")
+            print("⚠️ Forecast window generation failed during model training.")
             return False
 
         forecast_df = forecaster.generate_forecast(forecast_input, horizon_hours=horizon_hours)
         if forecast_df is None or forecast_df.empty:
-            print("âš ï¸ Forecast window generation failed during inference.")
+            print("⚠️ Forecast window generation failed during inference.")
             return False
 
         forecast_stats = forecaster.calculate_forecast_statistics(
             forecast_df, current_price=current_price, horizon_hours=horizon_hours
         )
 
-        print(f"\nðŸ“… Forecast Windows ({horizon_hours}h, 15-minute intervals):")
+        print(f"\n📅 Forecast Windows ({horizon_hours}h, 15-minute intervals):")
         for _, row in forecast_df.iterrows():
             forecast_delta_pct = ((row['predicted_price'] - current_price) / current_price) * 100
             timestamp = format_display_time(row['timestamp'])
             print(
                 f"   +{int(row['interval_minutes']):>3}m | {timestamp} | "
-                f"${row['predicted_price']:.2f} | Î” {forecast_delta_pct:+.2f}% | "
-                f"Ïƒ {row['prediction_std']:.2f}"
+                f"${row['predicted_price']:.2f} | Δ {forecast_delta_pct:+.2f}% | "
+                f"σ {row['prediction_std']:.2f}"
             )
 
-        print(f"\nðŸ“Š Forecast Summary:")
+        print(f"\n📊 Forecast Summary:")
         print(f"   Current Price: ${forecast_stats['current_price']:.2f}")
         print(f"   Forecast Mean: ${forecast_stats['forecast_mean']:.2f}")
         print(f"   Predicted Range: ${forecast_stats['predicted_min']:.2f} to ${forecast_stats['predicted_max']:.2f}")
@@ -296,7 +296,7 @@ def display_forecast_windows(price_df, horizon_hours=HORIZON_HOURS):
         return True
 
     except Exception as e:
-        print(f"\nâš ï¸ Failed to generate forecast windows: {e}")
+        print(f"\n⚠️ Failed to generate forecast windows: {e}")
         return False
 
 def detect_bar_minutes(df, default=BAR_MINUTES):
@@ -503,7 +503,7 @@ def evaluate_threshold_horizon_grid(raw_df, thresholds=None, horizons=None):
     search_df = raw_df.iloc[:search_cutoff].copy()
     results = []
 
-    print("\nðŸ§ª Label Search: threshold Ã— horizon walk-forward CV")
+    print("\n🧪 Label Search: threshold × horizon walk-forward CV")
     for horizon in horizons:
         for threshold in thresholds:
             try:
@@ -545,17 +545,17 @@ def evaluate_threshold_horizon_grid(raw_df, thresholds=None, horizons=None):
                     'class_balance': class_balance
                 })
             except Exception as exc:
-                print(f"   âš   skipped threshold={threshold:.4f}, horizon={horizon}m: {exc}")
+                print(f"   ⚠  skipped threshold={threshold:.4f}, horizon={horizon}m: {exc}")
 
     if not results:
-        print("   âš   Label search produced no valid candidates; using shared spec threshold=${PCT_THRESHOLD:.4f}, horizon=${HORIZON_MINUTES}m")
+        print("   ⚠  Label search produced no valid candidates; using shared spec threshold=${PCT_THRESHOLD:.4f}, horizon=${HORIZON_MINUTES}m")
         return {'threshold': PCT_THRESHOLD, 'horizon': HORIZON_MINUTES, 'cv_mean': 0.0, 'cv_spread': 0.0}
 
     results.sort(key=lambda row: (row['edge'], row['cv_mean'], -row['cv_spread']), reverse=True)
     for i, row in enumerate(results[:5], 1):
         print(
             f"   {i}. threshold={row['threshold']:.4f}, horizon={row['horizon']:>2}m | "
-            f"CV={row['cv_mean']:.3f} (Â±{row['cv_spread']:.3f}) | "
+            f"CV={row['cv_mean']:.3f} (±{row['cv_spread']:.3f}) | "
             f"baseline={row['baseline']:.3f} | edge={row['edge']:+.3f} | samples={row['samples']}"
         )
 
@@ -563,7 +563,7 @@ def evaluate_threshold_horizon_grid(raw_df, thresholds=None, horizons=None):
     best = stable[0] if stable else results[0]
     print(
         f"   Selected label: threshold={best['threshold']:.4f}, "
-        f"horizon={best['horizon']}m, CV={best['cv_mean']:.3f} (Â±{best['cv_spread']:.3f}), "
+        f"horizon={best['horizon']}m, CV={best['cv_mean']:.3f} (±{best['cv_spread']:.3f}), "
         f"baseline={best.get('baseline', 0.0):.3f}, edge={best.get('edge', 0.0):+.3f}"
     )
     return best
@@ -719,7 +719,7 @@ def identify_short_signal(df, adx_threshold=25):
 
 
 def identify_short_signal_lrs(df, adx_threshold=25, lr_period=30):
-    """Identify Short Signals via LR Slope divergence â€” fired when DPO and LRS do not align.
+    """Identify Short Signals via LR Slope divergence — fired when DPO and LRS do not align.
     Conditions (all must be true simultaneously):
     - DI- > DI+: Negative directional movement dominates
     - LR Slope < 0: Downward price momentum
@@ -745,7 +745,7 @@ def identify_short_signal_lrs(df, adx_threshold=25, lr_period=30):
 
 
 def identify_long_signal_dpo(df, adx_threshold=25):
-    """Inverse of identify_short_signal â€” Long via DPO alignment (LRS not required).
+    """Inverse of identify_short_signal — Long via DPO alignment (LRS not required).
     Fires when LRS and DPO are out of sync on the long side.
     Conditions (all must be true simultaneously):
     - DI+ > DI-: Positive directional movement dominates
@@ -771,7 +771,7 @@ def identify_long_signal_dpo(df, adx_threshold=25):
 
 
 def identify_long_signal_lrs(df, adx_threshold=25, lr_period=30):
-    """Inverse of identify_short_signal_lrs â€” Long via LR Slope alignment (DPO not required).
+    """Inverse of identify_short_signal_lrs — Long via LR Slope alignment (DPO not required).
     Fires when DPO and LRS are out of sync on the long side.
     Conditions (all must be true simultaneously):
     - DI+ > DI-: Positive directional movement dominates
@@ -838,8 +838,7 @@ def _fit_with_balanced_sample_weight(estimator, X, y, **fit_kwargs):
                                        >=1.9 rejects top-level sample_weight on
                                        Pipeline.fit with ValueError, so we cannot
                                        fall back to it there).
-         - VotingClassifier or any    -> cannot safely route; just call .fit(X, y)
-           _BaseHeterogeneousEnsemble   (no sample_weight) and warn once.
+         - VotingClassifier           -> pass weights to all adapted members.
          - everything else            -> direct .fit(X, y, sample_weight=sw).
       2. On TypeError or ValueError, retry without sample_weight (cuML builds that
          reject it entirely -- pre-25.x cuML RF; sklearn Pipelines in 1.9 that we
@@ -850,7 +849,7 @@ def _fit_with_balanced_sample_weight(estimator, X, y, **fit_kwargs):
     releases. So we never trust inspect.signature(); we always try the call
     first and fall back on failure.
 
-    Returns the fitted estimator.
+    Returns the fitted estimator, which may be a weighted CPU forest fallback.
     """
     try:
         from sklearn.utils.class_weight import compute_sample_weight as _csw
@@ -886,27 +885,34 @@ def _fit_with_balanced_sample_weight(estimator, X, y, **fit_kwargs):
             except Exception:
                 return estimator.fit(X, y, **fit_kwargs)
 
-    # Route 2: Heterogeneous ensembles (VotingClassifier, StackingClassifier).
-    # These run their sub-estimators in parallel via sklearn.utils.parallel, so
-    # we cannot intercept sample_weight for them at this layer; the VotingClassifier
-    # construction site already swaps cuML sub-estimators for sklearn-only ones,
-    # which means a plain fit() without sample_weight suffices for class balancing
-    # via the sklearn estimators' own class_weight='balanced' constructor args.
-    try:
-        from sklearn.ensemble._base import _BaseHeterogeneousEnsemble as _Hetero
-    except Exception:
-        _Hetero = None
-    if _Hetero is not None and isinstance(estimator, _Hetero):
-        _emit_sample_weight_skip_warning(
-            cls, backend,
-            'heterogeneous ensemble -- sample_weight skipped; rely on sub-estimator class_weight=' + repr(getattr(estimator, 'voting', None)),
-        )
-        return estimator.fit(X, y, **fit_kwargs)
+    # Voting members support weights, including the adapted pipelines. Let
+    # routing errors surface instead of silently training an unbalanced model.
+    if isinstance(estimator, VotingClassifier):
+        return estimator.fit(X, y, sample_weight=sw, **fit_kwargs)
 
     # Route 3: everything else -- direct pass-through.
     try:
         return estimator.fit(X, y, sample_weight=sw, **fit_kwargs)
     except (TypeError, ValueError) as exc:
+        if backend == 'cuML' and cls == 'RandomForestClassifier':
+            if 'sample_weight' not in str(exc):
+                raise
+            # Preserve the requested sklearn settings when available. Cloned
+            # cuML estimators may only retain their supported constructor params.
+            params = getattr(estimator, '_cpu_fallback_kwargs', None)
+            if params is None:
+                supported = RandomForestClassifier().get_params()
+                params = {k: v for k, v in estimator.get_params().items()
+                          if k in supported}
+            params = dict(params)
+            params['class_weight'] = None  # sw already balances the classes
+            params.setdefault('n_jobs', -1)
+            fallback = RandomForestClassifier(**params)
+            if not getattr(_fit_with_balanced_sample_weight, '_rf_fallback_reported', False):
+                print("   [training] cuML RandomForest does not support sample_weight; "
+                      "using a CPU RandomForest with balanced sample weights.")
+                _fit_with_balanced_sample_weight._rf_fallback_reported = True
+            return fallback.fit(X, y, sample_weight=sw, **fit_kwargs)
         _emit_sample_weight_skip_warning(cls, backend, exc)
         return estimator.fit(X, y, **fit_kwargs)
 
@@ -926,20 +932,20 @@ def _emit_sample_weight_skip_warning(cls, backend, exc):
     _seen.add(_key)
     _emit_sample_weight_skip_warning._seen = _seen
     if backend == 'cuML':
-        print(f"   âš   cuML {cls}.fit() rejected sample_weight ({exc}); "
+        print(f"   ⚠  cuML {cls}.fit() rejected sample_weight ({exc}); "
               f"this is a known cuML limitation (cuML estimators don't expose "
               f"sample_weight as a fit kwarg). Class balancing is being skipped on "
               f"the GPU side for this estimator type. For ensemble sub-estimators, "
               f"the construction site should swap cuML for sklearn equivalents.")
     elif cls == 'Pipeline':
-        print(f"   âš   sklearn Pipeline.fit() rejected sample_weight ({exc}); "
+        print(f"   ⚠  sklearn Pipeline.fit() rejected sample_weight ({exc}); "
               f"class balancing is being skipped on the final step.")
     elif 'Heterogeneous' in cls:
-        print(f"   âš   sklearn {cls}.fit() can't propagate sample_weight; "
+        print(f"   ⚠  sklearn {cls}.fit() can't propagate sample_weight; "
               f"class balancing is being skipped. Sub-estimators should expose "
               f"class_weight='balanced' on the constructor instead.")
     else:
-        print(f"   âš   sklearn {cls}.fit() rejected sample_weight ({exc}); "
+        print(f"   ⚠  sklearn {cls}.fit() rejected sample_weight ({exc}); "
               f"class balancing is being skipped for this estimator.")
 
 def _gpu_rf(**kwargs):
@@ -953,10 +959,12 @@ def _gpu_rf(**kwargs):
     if CUDA_AVAILABLE and _cuml_RF is not None:
         gpu_kw = {k: v for k, v in kwargs.items() if k not in _CUM_RF_UNSUPPORTED}
         try:
-            return _cuml_RF(**gpu_kw)
+            estimator = _cuml_RF(**gpu_kw)
+            estimator._cpu_fallback_kwargs = dict(kwargs)
+            return estimator
         except TypeError as exc:
             # Defensive: if a future cuML version supports these, fall back gracefully.
-            print(f"   âš   cuML RF rejected kwargs ({exc}); falling back to sklearn.")
+            print(f"   ⚠  cuML RF rejected kwargs ({exc}); falling back to sklearn.")
     return RandomForestClassifier(**kwargs)
 
 
@@ -990,7 +998,7 @@ def _gpu_lr(**kwargs):
             _gpu_lr._warned = getattr(_gpu_lr, '_warned', False)
             if not _gpu_lr._warned:
                 _gpu_lr._warned = True
-                print(f"   âš   cuML LR rejected kwargs ({exc}); falling back to sklearn.")
+                print(f"   ⚠  cuML LR rejected kwargs ({exc}); falling back to sklearn.")
         except Exception:
             pass
     return LogisticRegression(**kwargs)
@@ -1100,9 +1108,9 @@ class ScalerEvaluator:
                     if np.isnan(avg_score):
                         raise ValueError("cross_val_score returned NaN")
                     scored = (avg_score, _cpu_scaler_by_name(name))
-                    print(f"    â†ª {name} GPU path failed ({type(e_primary).__name__}); CPU fallback succeeded (CV={avg_score:.4f}).")
+                    print(f"    ↪ {name} GPU path failed ({type(e_primary).__name__}); CPU fallback succeeded (CV={avg_score:.4f}).")
                 except Exception as e_cpu:
-                    print(f"    âš   {name} scaler eval failed: {type(e_primary).__name__}: {e_primary}; CPU fallback: {type(e_cpu).__name__}: {e_cpu}")
+                    print(f"    ⚠  {name} scaler eval failed: {type(e_primary).__name__}: {e_primary}; CPU fallback: {type(e_cpu).__name__}: {e_cpu}")
             if scored is not None:
                 results.append((name, scored[0], scored[1]))
         
@@ -1113,7 +1121,7 @@ class ScalerEvaluator:
 class EnsembleConfidenceBooster:
     """Multi-scaler ensemble to verify and boost voting engine confidence.
     
-    Uses the top 3 scalers, each paired with RF, GB, LR for a 3Ã—3 parallel ensemble.
+    Uses the top 3 scalers, each paired with RF, GB, LR for a 3×3 parallel ensemble.
     Each model votes on direction; majority vote + average confidence boost the signal.
     """
     
@@ -1132,14 +1140,14 @@ class EnsembleConfidenceBooster:
         # failed on this platform/dependency combination), the booster will
         # vote "neutral" later rather than crash with ZeroDivisionError.
         if not scalers_list:
-            print('    âš ï¸  ScalerEvaluator returned no results; confidence booster will be neutral.')
+            print('    ⚠️  ScalerEvaluator returned no results; confidence booster will be neutral.')
             return
         
         for scaler_name, _, scaler in scalers_list[:3]:
             try:
                 X_scaled = scaler.fit_transform(X_train)
             except Exception as e:
-                print(f"    âš   {scaler_name} scaler failed in booster: {e}. Falling back to CPU scaler.")
+                print(f"    ⚠  {scaler_name} scaler failed in booster: {e}. Falling back to CPU scaler.")
                 scaler = _cpu_scaler_by_name(scaler_name)
                 X_scaled = scaler.fit_transform(X_train)
             self.models[scaler_name] = {}
@@ -1158,7 +1166,7 @@ class EnsembleConfidenceBooster:
                     class_weight='balanced', random_state=random_state, n_jobs=-1
                 )
             # Apply balanced class_weight via sample_weight (works on cuML RF and sklearn RF).
-            _fit_with_balanced_sample_weight(rf, X_scaled, y_train)
+            rf = _fit_with_balanced_sample_weight(rf, X_scaled, y_train)
             self.models[scaler_name]['rf'] = (rf, scaler)
             
             # Gradient Boosting
@@ -1287,16 +1295,16 @@ def fuse_voter_and_ensemble(vote, boost_dir, boost_conf):
 
 def main():
     """Enhanced Bitcoin prediction using scikit-learn ensemble on 1-minute data."""
-    print("ðŸš€ Enhanced Bitcoin 1-Minute Interval Prediction with Scikit-Learn")
+    print("🚀 Enhanced Bitcoin 1-Minute Interval Prediction with Scikit-Learn")
     print("=" * 70)
     if CUDA_AVAILABLE:
-        print(f"âš¡ Backend: CUDA/cuML active ({_gpu_count} GPU(s) detected)")
+        print(f"⚡ Backend: CUDA/cuML active ({_gpu_count} GPU(s) detected)")
     else:
-        print("ðŸ§° Backend: CPU fallback active (CUDA/cuML unavailable)")
+        print("🧰 Backend: CPU fallback active (CUDA/cuML unavailable)")
     
     # Get data and create features
     raw_df = fetch_bitcoin_data(num_points=NUM_DATA_POINTS, interval_minutes=BAR_MINUTES)
-    print(f"ðŸ“Š Fetched {len(raw_df)} data points of Bitcoin data at {BAR_MINUTES}-minute intervals")
+    print(f"📊 Fetched {len(raw_df)} data points of Bitcoin data at {BAR_MINUTES}-minute intervals")
 
     # Hardcoded label spec -- the auto-search (evaluate_threshold_horizon_grid)
     # is bypassed. Use the values from config.prediction_spec.PCT_THRESHOLD and
@@ -1313,40 +1321,40 @@ def main():
         pct_threshold=selected_threshold,
         horizon_steps=horizon_to_steps(selected_horizon),
     )
-    print(f"âš™ï¸  Created {len(df.columns)-3} technical features")  # -3 for date, price, target
-    print(f"ðŸŽ¯ Training label: next {selected_horizon} minute(s), move threshold Â±{move_label}")
+    print(f"⚙️  Created {len(df.columns)-3} technical features")  # -3 for date, price, target
+    print(f"🎯 Training label: next {selected_horizon} minute(s), move threshold ±{move_label}")
 
     lr_period = horizon_to_steps(30, bar_minutes=detect_bar_minutes(raw_df))
     lr_col = f'lr_slope_{lr_period}'
 
     # --- Rule-Based LONG Signal: DPO > 0 AND LR Slope > 0 AND DI+ > DI- AND ADX >= 25 AND MACD Hist > 0 ---
-    print("\nðŸ“¡ Rule-Based LONG Signal (DPO > 0 AND LR Slope > 0 AND DI+ > DI- AND ADX â‰¥ 25 AND MACD Hist > 0):")    
+    print("\n📡 Rule-Based LONG Signal (DPO > 0 AND LR Slope > 0 AND DI+ > DI- AND ADX ≥ 25 AND MACD Hist > 0):")
     try:
         long_signals_rule = identify_long_signal(df, adx_threshold=25, lr_period=lr_period)
         if not long_signals_rule.empty:
             latest = long_signals_rule.iloc[-1]
             hl_window = calculate_next_hl_window(latest)
-            print(f"   âœ… LONG Signal Detected!")
+            print(f"   ✅ LONG Signal Detected!")
             print(f"   Entry Price  : ${latest['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest['date'])}")
-            print(f"   DPO          : {latest['dpo']:.4f}  (> 0 âœ“)")
-            print(f"   LR Slope(30) : {latest[lr_col]:.6f}  (> 0 âœ“)")
-            print(f"   DI+          : {latest['di_plus']:.2f}  > DI- {latest['di_minus']:.2f}  (Strong âœ“)")
-            print(f"   ADX          : {latest['adx']:.2f}  (â‰¥ 25 âœ“)")
-            print(f"   MACD Hist    : {latest['macd_histogram']:.4f}  (> 0 âœ“)  MACD {latest['macd']:.4f} / Sig {latest['macd_signal']:.4f}")
-            print(f"   â”€â”€ Next High/Low Window (BB + Volatility) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€")
+            print(f"   DPO          : {latest['dpo']:.4f}  (> 0 ✓)")
+            print(f"   LR Slope(30) : {latest[lr_col]:.6f}  (> 0 ✓)")
+            print(f"   DI+          : {latest['di_plus']:.2f}  > DI- {latest['di_minus']:.2f}  (Strong ✓)")
+            print(f"   ADX          : {latest['adx']:.2f}  (≥ 25 ✓)")
+            print(f"   MACD Hist    : {latest['macd_histogram']:.4f}  (> 0 ✓)  MACD {latest['macd']:.4f} / Sig {latest['macd_signal']:.4f}")
+            print(f"   ── Next High/Low Window (BB + Volatility) ──────────────")
             print(f"   BB %B        : {hl_window['bb_pct']:.1f}%  (position within bands)")
             print(f"   BB Upper     : ${latest['bb_upper']:.2f}")
             print(f"   BB Lower     : ${latest['bb_lower']:.2f}")
-            print(f"   Vol(10)      : Â±${latest['sma_volatility_10']:.2f}")
+            print(f"   Vol(10)      : ±${latest['sma_volatility_10']:.2f}")
             print(f"   Next High    : ${hl_window['next_high']:.2f}")
             print(f"   Next Low     : ${hl_window['next_low']:.2f}")
-            print(f"   Window Î”     : {hl_window['window_pct_diff']:.3f}%")
+            print(f"   Window Δ     : {hl_window['window_pct_diff']:.3f}%")
             print(f"   Total Long Signals In Period: {len(long_signals_rule)}")
         else:
-            print("   âš   No Long Signal: DPO > 0, LR Slope > 0, DI+ dominant, ADX â‰¥ 25, and MACD Hist > 0 not simultaneously met.")
+            print("   ⚠  No Long Signal: DPO > 0, LR Slope > 0, DI+ dominant, ADX ≥ 25, and MACD Hist > 0 not simultaneously met.")
     except ValueError as e:
-        print(f"   âš   Signal identification error: {e}")
+        print(f"   ⚠  Signal identification error: {e}")
 
     # --- Economic & Game Theory Voting Engine ---
     # SignalVotingEngine (Adam Smith / BdM Expected Utility / Nash Equilibrium) was
@@ -1355,119 +1363,119 @@ def main():
 
 
     # --- Rule-Based Short Signal: DI- > DI+, DPO < 0, ADX >= 25, MACD Hist < 0 ---
-    print("\nðŸ“¡ Rule-Based SHORT Signal (DI- > DI+ AND DPO < 0 AND ADX â‰¥ 25 AND MACD Hist < 0):")
+    print("\n📡 Rule-Based SHORT Signal (DI- > DI+ AND DPO < 0 AND ADX ≥ 25 AND MACD Hist < 0):")
     try:
         short_signals_rule = identify_short_signal(df, adx_threshold=25)
         if not short_signals_rule.empty:
             latest_s = short_signals_rule.iloc[-1]
             hl_window_s = calculate_next_hl_window(latest_s)
-            print(f"   ðŸ”´ SHORT Signal Detected!")
+            print(f"   🔴 SHORT Signal Detected!")
             print(f"   Entry Price  : ${latest_s['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest_s['date'])}")
-            print(f"   DPO          : {latest_s['dpo']:.4f}  (< 0 âœ“)")
-            print(f"   DI-          : {latest_s['di_minus']:.2f}  > DI+ {latest_s['di_plus']:.2f}  (Dominant âœ“)")
-            print(f"   ADX          : {latest_s['adx']:.2f}  (â‰¥ 25 âœ“)")
-            print(f"   MACD Hist    : {latest_s['macd_histogram']:.4f}  (< 0 âœ“)  MACD {latest_s['macd']:.4f} / Sig {latest_s['macd_signal']:.4f}")
-            print(f"   â”€â”€ Next High/Low Window (BB + Volatility) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€")
+            print(f"   DPO          : {latest_s['dpo']:.4f}  (< 0 ✓)")
+            print(f"   DI-          : {latest_s['di_minus']:.2f}  > DI+ {latest_s['di_plus']:.2f}  (Dominant ✓)")
+            print(f"   ADX          : {latest_s['adx']:.2f}  (≥ 25 ✓)")
+            print(f"   MACD Hist    : {latest_s['macd_histogram']:.4f}  (< 0 ✓)  MACD {latest_s['macd']:.4f} / Sig {latest_s['macd_signal']:.4f}")
+            print(f"   ── Next High/Low Window (BB + Volatility) ──────────────")
             print(f"   BB %B        : {hl_window_s['bb_pct']:.1f}%  (position within bands)")
             print(f"   BB Upper     : ${latest_s['bb_upper']:.2f}")
             print(f"   BB Lower     : ${latest_s['bb_lower']:.2f}")
-            print(f"   Vol(10)      : Â±${latest_s['sma_volatility_10']:.2f}")
+            print(f"   Vol(10)      : ±${latest_s['sma_volatility_10']:.2f}")
             print(f"   Next High    : ${hl_window_s['next_high']:.2f}")
             print(f"   Next Low     : ${hl_window_s['next_low']:.2f}")
-            print(f"   Window Î”     : {hl_window_s['window_pct_diff']:.3f}%")
+            print(f"   Window Δ     : {hl_window_s['window_pct_diff']:.3f}%")
             print(f"   Total Short Signals In Period: {len(short_signals_rule)}")
         else:
-            print("   âš   No Short Signal: DI- dominant, DPO < 0, ADX â‰¥ 25, and MACD Hist < 0 not simultaneously met.")
+            print("   ⚠  No Short Signal: DI- dominant, DPO < 0, ADX ≥ 25, and MACD Hist < 0 not simultaneously met.")
     except ValueError as e:
-        print(f"   âš   Signal identification error: {e}")
+        print(f"   ⚠  Signal identification error: {e}")
 
     # --- Short Signal (LRS Variant): DI- > DI+, LR Slope < 0, ADX >= 25, MACD Hist < 0 ---
-    print("\nðŸ“¡ SHORT Signal â€” LRS Divergence (DI- > DI+ AND LR Slope < 0 AND ADX â‰¥ 25 AND MACD Hist < 0):")
+    print("\n📡 SHORT Signal — LRS Divergence (DI- > DI+ AND LR Slope < 0 AND ADX ≥ 25 AND MACD Hist < 0):")
     try:
         short_lrs_rule = identify_short_signal_lrs(df, adx_threshold=25, lr_period=lr_period)
         if not short_lrs_rule.empty:
             latest_sl = short_lrs_rule.iloc[-1]
             hl_window_sl = calculate_next_hl_window(latest_sl)
-            print(f"   ðŸ”´ SHORT (LRS) Signal Detected!")
+            print(f"   🔴 SHORT (LRS) Signal Detected!")
             print(f"   Entry Price  : ${latest_sl['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest_sl['date'])}")
-            print(f"   LR Slope(30) : {latest_sl[lr_col]:.6f}  (< 0 âœ“)")
-            print(f"   DI-          : {latest_sl['di_minus']:.2f}  > DI+ {latest_sl['di_plus']:.2f}  (Dominant âœ“)")
-            print(f"   ADX          : {latest_sl['adx']:.2f}  (â‰¥ 25 âœ“)")
-            print(f"   MACD Hist    : {latest_sl['macd_histogram']:.4f}  (< 0 âœ“)  MACD {latest_sl['macd']:.4f} / Sig {latest_sl['macd_signal']:.4f}")
-            print(f"   DPO          : {latest_sl['dpo']:.4f}  (not required â€” MACD fills momentum gap)")
-            print(f"   â”€â”€ Next High/Low Window (BB + Volatility) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€")
+            print(f"   LR Slope(30) : {latest_sl[lr_col]:.6f}  (< 0 ✓)")
+            print(f"   DI-          : {latest_sl['di_minus']:.2f}  > DI+ {latest_sl['di_plus']:.2f}  (Dominant ✓)")
+            print(f"   ADX          : {latest_sl['adx']:.2f}  (≥ 25 ✓)")
+            print(f"   MACD Hist    : {latest_sl['macd_histogram']:.4f}  (< 0 ✓)  MACD {latest_sl['macd']:.4f} / Sig {latest_sl['macd_signal']:.4f}")
+            print(f"   DPO          : {latest_sl['dpo']:.4f}  (not required — MACD fills momentum gap)")
+            print(f"   ── Next High/Low Window (BB + Volatility) ──────────────")
             print(f"   BB %B        : {hl_window_sl['bb_pct']:.1f}%  (position within bands)")
             print(f"   BB Upper     : ${latest_sl['bb_upper']:.2f}")
             print(f"   BB Lower     : ${latest_sl['bb_lower']:.2f}")
-            print(f"   Vol(10)      : Â±${latest_sl['sma_volatility_10']:.2f}")
+            print(f"   Vol(10)      : ±${latest_sl['sma_volatility_10']:.2f}")
             print(f"   Next High    : ${hl_window_sl['next_high']:.2f}")
             print(f"   Next Low     : ${hl_window_sl['next_low']:.2f}")
-            print(f"   Window Î”     : {hl_window_sl['window_pct_diff']:.3f}%")
+            print(f"   Window Δ     : {hl_window_sl['window_pct_diff']:.3f}%")
             print(f"   Total Short (LRS) Signals In Period: {len(short_lrs_rule)}")
         else:
-            print("   âš   No Short (LRS) Signal: DI- dominant, LR Slope < 0, ADX â‰¥ 25, and MACD Hist < 0 not simultaneously met.")
+            print("   ⚠  No Short (LRS) Signal: DI- dominant, LR Slope < 0, ADX ≥ 25, and MACD Hist < 0 not simultaneously met.")
     except ValueError as e:
-        print(f"   âš   Signal identification error: {e}")
+        print(f"   ⚠  Signal identification error: {e}")
 
     # --- Long Signal (DPO Variant): DI+ > DI-, DPO > 0, ADX >= 25, MACD Hist > 0 [inverse of SHORT primary] ---
-    print("\nðŸ“¡ LONG Signal â€” DPO Only (DI+ > DI- AND DPO > 0 AND ADX â‰¥ 25 AND MACD Hist > 0):")
+    print("\n📡 LONG Signal — DPO Only (DI+ > DI- AND DPO > 0 AND ADX ≥ 25 AND MACD Hist > 0):")
     try:
         long_dpo_rule = identify_long_signal_dpo(df, adx_threshold=25)
         if not long_dpo_rule.empty:
             latest_ld = long_dpo_rule.iloc[-1]
             hl_window_ld = calculate_next_hl_window(latest_ld)
-            print(f"   âœ… LONG (DPO) Signal Detected!")
+            print(f"   ✅ LONG (DPO) Signal Detected!")
             print(f"   Entry Price  : ${latest_ld['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest_ld['date'])}")
-            print(f"   DPO          : {latest_ld['dpo']:.4f}  (> 0 âœ“)")
-            print(f"   DI+          : {latest_ld['di_plus']:.2f}  > DI- {latest_ld['di_minus']:.2f}  (Dominant âœ“)")
-            print(f"   ADX          : {latest_ld['adx']:.2f}  (â‰¥ 25 âœ“)")
-            print(f"   MACD Hist    : {latest_ld['macd_histogram']:.4f}  (> 0 âœ“)  MACD {latest_ld['macd']:.4f} / Sig {latest_ld['macd_signal']:.4f}")
-            print(f"   LR Slope(30) : {latest_ld[lr_col]:.6f}  (not required â€” MACD fills momentum gap)")
-            print(f"   â”€â”€ Next High/Low Window (BB + Volatility) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€")
+            print(f"   DPO          : {latest_ld['dpo']:.4f}  (> 0 ✓)")
+            print(f"   DI+          : {latest_ld['di_plus']:.2f}  > DI- {latest_ld['di_minus']:.2f}  (Dominant ✓)")
+            print(f"   ADX          : {latest_ld['adx']:.2f}  (≥ 25 ✓)")
+            print(f"   MACD Hist    : {latest_ld['macd_histogram']:.4f}  (> 0 ✓)  MACD {latest_ld['macd']:.4f} / Sig {latest_ld['macd_signal']:.4f}")
+            print(f"   LR Slope(30) : {latest_ld[lr_col]:.6f}  (not required — MACD fills momentum gap)")
+            print(f"   ── Next High/Low Window (BB + Volatility) ──────────────")
             print(f"   BB %B        : {hl_window_ld['bb_pct']:.1f}%  (position within bands)")
             print(f"   BB Upper     : ${latest_ld['bb_upper']:.2f}")
             print(f"   BB Lower     : ${latest_ld['bb_lower']:.2f}")
-            print(f"   Vol(10)      : Â±${latest_ld['sma_volatility_10']:.2f}")
+            print(f"   Vol(10)      : ±${latest_ld['sma_volatility_10']:.2f}")
             print(f"   Next High    : ${hl_window_ld['next_high']:.2f}")
             print(f"   Next Low     : ${hl_window_ld['next_low']:.2f}")
-            print(f"   Window Î”     : {hl_window_ld['window_pct_diff']:.3f}%")
+            print(f"   Window Δ     : {hl_window_ld['window_pct_diff']:.3f}%")
             print(f"   Total Long (DPO) Signals In Period: {len(long_dpo_rule)}")
         else:
-            print("   âš   No Long (DPO) Signal: DI+ dominant, DPO > 0, ADX â‰¥ 25, and MACD Hist > 0 not simultaneously met.")
+            print("   ⚠  No Long (DPO) Signal: DI+ dominant, DPO > 0, ADX ≥ 25, and MACD Hist > 0 not simultaneously met.")
     except ValueError as e:
-        print(f"   âš   Signal identification error: {e}")
+        print(f"   ⚠  Signal identification error: {e}")
 
     # --- Long Signal (LRS Variant): DI+ > DI-, LR Slope > 0, ADX >= 25, MACD Hist > 0  [inverse of SHORT LRS] ---
-    print("\nðŸ“¡ LONG Signal â€” LRS Divergence (DI+ > DI- AND LR Slope > 0 AND ADX â‰¥ 25 AND MACD Hist > 0):")
+    print("\n📡 LONG Signal — LRS Divergence (DI+ > DI- AND LR Slope > 0 AND ADX ≥ 25 AND MACD Hist > 0):")
     try:
         long_lrs_rule = identify_long_signal_lrs(df, adx_threshold=25, lr_period=lr_period)
         if not long_lrs_rule.empty:
             latest_ll = long_lrs_rule.iloc[-1]
             hl_window_ll = calculate_next_hl_window(latest_ll)
-            print(f"   âœ… LONG (LRS) Signal Detected!")
+            print(f"   ✅ LONG (LRS) Signal Detected!")
             print(f"   Entry Price  : ${latest_ll['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest_ll['date'])}")
-            print(f"   LR Slope(30) : {latest_ll[lr_col]:.6f}  (> 0 âœ“)")
-            print(f"   DI+          : {latest_ll['di_plus']:.2f}  > DI- {latest_ll['di_minus']:.2f}  (Dominant âœ“)")
-            print(f"   ADX          : {latest_ll['adx']:.2f}  (â‰¥ 25 âœ“)")
-            print(f"   MACD Hist    : {latest_ll['macd_histogram']:.4f}  (> 0 âœ“)  MACD {latest_ll['macd']:.4f} / Sig {latest_ll['macd_signal']:.4f}")
-            print(f"   DPO          : {latest_ll['dpo']:.4f}  (not required â€” MACD fills momentum gap)")
-            print(f"   â”€â”€ Next High/Low Window (BB + Volatility) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€")
+            print(f"   LR Slope(30) : {latest_ll[lr_col]:.6f}  (> 0 ✓)")
+            print(f"   DI+          : {latest_ll['di_plus']:.2f}  > DI- {latest_ll['di_minus']:.2f}  (Dominant ✓)")
+            print(f"   ADX          : {latest_ll['adx']:.2f}  (≥ 25 ✓)")
+            print(f"   MACD Hist    : {latest_ll['macd_histogram']:.4f}  (> 0 ✓)  MACD {latest_ll['macd']:.4f} / Sig {latest_ll['macd_signal']:.4f}")
+            print(f"   DPO          : {latest_ll['dpo']:.4f}  (not required — MACD fills momentum gap)")
+            print(f"   ── Next High/Low Window (BB + Volatility) ──────────────")
             print(f"   BB %B        : {hl_window_ll['bb_pct']:.1f}%  (position within bands)")
             print(f"   BB Upper     : ${latest_ll['bb_upper']:.2f}")
             print(f"   BB Lower     : ${latest_ll['bb_lower']:.2f}")
-            print(f"   Vol(10)      : Â±${latest_ll['sma_volatility_10']:.2f}")
+            print(f"   Vol(10)      : ±${latest_ll['sma_volatility_10']:.2f}")
             print(f"   Next High    : ${hl_window_ll['next_high']:.2f}")
             print(f"   Next Low     : ${hl_window_ll['next_low']:.2f}")
-            print(f"   Window Î”     : {hl_window_ll['window_pct_diff']:.3f}%")
+            print(f"   Window Δ     : {hl_window_ll['window_pct_diff']:.3f}%")
             print(f"   Total Long (LRS) Signals In Period: {len(long_lrs_rule)}")
         else:
-            print("   âš   No Long (LRS) Signal: DI+ dominant, LR Slope > 0, ADX â‰¥ 25, and MACD Hist > 0 not simultaneously met.")
+            print("   ⚠  No Long (LRS) Signal: DI+ dominant, LR Slope > 0, ADX ≥ 25, and MACD Hist > 0 not simultaneously met.")
     except ValueError as e:
-        print(f"   âš   Signal identification error: {e}")
+        print(f"   ⚠  Signal identification error: {e}")
 
 
     # Select features (exclude non-predictive columns)
@@ -1475,14 +1483,14 @@ def main():
     X = df[feature_cols]
     y = df['target'].astype(int)
     
-    print(f"\nðŸŽ¯ Using {len(feature_cols)} features for prediction")
+    print(f"\n🎯 Using {len(feature_cols)} features for prediction")
     
     # Class distribution
     class_dist = y.value_counts().sort_index()
-    print(f"\nðŸ“ˆ Class Distribution:")
-    print(f"   Decrease â‰¥{move_label}: {class_dist.get(-1, 0)} ({class_dist.get(-1, 0)/len(y)*100:.1f}%)")
+    print(f"\n📈 Class Distribution:")
+    print(f"   Decrease ≥{move_label}: {class_dist.get(-1, 0)} ({class_dist.get(-1, 0)/len(y)*100:.1f}%)")
     print(f"   No Change: {class_dist.get(0, 0)} ({class_dist.get(0, 0)/len(y)*100:.1f}%)")
-    print(f"   Increase â‰¥{move_label}: {class_dist.get(1, 0)} ({class_dist.get(1, 0)/len(y)*100:.1f}%)")
+    print(f"   Increase ≥{move_label}: {class_dist.get(1, 0)} ({class_dist.get(1, 0)/len(y)*100:.1f}%)")
     
     # Time series split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
@@ -1511,24 +1519,24 @@ def main():
             _y_proba = _state.ensemble.predict_proba(_X_latest)[0]
             _y_pred = int(np.argmax(_y_proba)) - 1   # classes were [-1, 0, 1] -> probs order matches
             _conf = float(np.max(_y_proba))
-            print(f"   âš¡ Fast-path predict (cache {_age_s:.1f}s old, schema v{_state.schema_version}): direction={_y_pred:+d}  confidence={_conf:.2%}")
-            print(f"   ðŸ“¦ Reused ensemble: {_state.ensemble.__class__.__name__}, booster: {_state.booster.__class__.__name__}, scalers: {len(list(_state.scaler_results))}")
+            print(f"   ⚡ Fast-path predict (cache {_age_s:.1f}s old, schema v{_state.schema_version}): direction={_y_pred:+d}  confidence={_conf:.2%}")
+            print(f"   📦 Reused ensemble: {_state.ensemble.__class__.__name__}, booster: {_state.booster.__class__.__name__}, scalers: {len(list(_state.scaler_results))}")
             # Note: we deliberately do NOT save again here (no fresh training happened).
             # The cached state remains valid; the next normal run will refresh it.
             return
         except (FileNotFoundError, _fp_ModelStateError, RuntimeError) as _fp_exc:
-            print(f"   â©  Fast path unavailable ({_fp_exc}); falling back to fresh training.")
+            print(f"   ⏩  Fast path unavailable ({_fp_exc}); falling back to fresh training.")
         except Exception as _fp_exc:
-            print(f"   â©  Fast path error ({type(_fp_exc).__name__}: {_fp_exc}); falling back to fresh training.")
+            print(f"   ⏩  Fast path error ({type(_fp_exc).__name__}: {_fp_exc}); falling back to fresh training.")
 
     # --- Scaler Evaluation & Multi-Scaler Ensemble Confidence Booster ---
-    print("\nðŸ” Evaluating 5 scalers for optimal feature preprocessing...")
+    print("\n🔍 Evaluating 5 scalers for optimal feature preprocessing...")
     scaler_results = ScalerEvaluator.evaluate(X_train, y_train, cv=3)
     print(f"   Top 3 Scalers (by CV accuracy):")
     for i, (name, score, _) in enumerate(scaler_results[:3], 1):
         print(f"   {i}. {name:<25} CV Accuracy: {score:.4f}")
     
-    print(f"\nðŸ¤ Multi-Scaler Ensemble Confidence Booster (3 scalers Ã— 3 models = 9 voters)")
+    print(f"\n🤝 Multi-Scaler Ensemble Confidence Booster (3 scalers × 3 models = 9 voters)")
     booster = EnsembleConfidenceBooster(scaler_results, X_train, y_train)
     
     # Get latest test row for ensemble prediction
@@ -1549,7 +1557,7 @@ def main():
     print()
     
     # Create ensemble of classifiers
-    print(f"\nðŸ¤– Training Scikit-Learn Ensemble...")
+    print(f"\n🤖 Training Scikit-Learn Ensemble...")
     
     # Random Forest -- balancing applied at fit time via sample_weight
     # (cuML doesn't accept class_weight in __init__; the explicit fit() below wins
@@ -1588,19 +1596,9 @@ def main():
         class_weight='balanced', random_state=42, n_jobs=-1
     )
     
-    # Ensemble voting classifier.
-    #
-    # sklearn's VotingClassifier.fit() forwards `sample_weight` (and
-    # `fit_params` generally) to each underlying estimator's .fit(). cuML
-    # estimators (cuml.ensemble.RandomForestClassifier,
-    # cuml.linear_model.LogisticRegression) raise TypeError when
-    # sample_weight is passed, which sklearn then re-raises as
-    # 'Underlying estimator <Name> does not support sample weights.' -- see
-    # sklearn/ensemble/_base.py:_fit_single_estimator. Both the walk-forward
-    # CV (walk_forward_scores) and the calibration (fit_calibrated_classifier)
-    # pass sample_weight=, so we swap in sklearn-only equivalents for those
-    # two sub-estimators. The cuML `rf` and `lr_scaled_pipe` remain in scope
-    # above for any standalone use later in this module.
+    # Use CPU ensemble members for consistent sample-weight support. The factory
+    # adapts pipelines and removes constructor class weights so balanced sample
+    # weights apply exactly once during cross-validation and calibration.
     _ensemble_rf = RandomForestClassifier(
         n_estimators=200, max_depth=15, min_samples_split=5,
         class_weight='balanced', random_state=42, n_jobs=-1,
@@ -1611,7 +1609,8 @@ def main():
             max_iter=2000, class_weight='balanced', random_state=42,
         )),
     ])
-    ensemble = VotingClassifier([
+    from weighted_voting import make_weighted_voting_classifier
+    ensemble = make_weighted_voting_classifier([
         ('rf', _ensemble_rf),
         ('gb', gb),
         ('gb_minmax', gb_minmax_pipe),
@@ -1621,8 +1620,8 @@ def main():
     ], voting='soft')
     
     cv_scores = walk_forward_scores(clone(ensemble), X_train, y_train, desired_splits=5, scoring='accuracy')
-    print(f"\nðŸ”„ Walk-Forward Cross-Validation:")
-    print(f"   Mean CV Accuracy: {cv_scores.mean():.3f} (Â±{cv_scores.std()*2:.3f})")
+    print(f"\n🔄 Walk-Forward Cross-Validation:")
+    print(f"   Mean CV Accuracy: {cv_scores.mean():.3f} (±{cv_scores.std()*2:.3f})")
 
     # Train calibrated ensemble
     ensemble = fit_calibrated_classifier(ensemble, X_train, y_train, desired_splits=3)
@@ -1634,24 +1633,24 @@ def main():
     
     # Performance evaluation
     accuracy = accuracy_score(y_test, y_pred)
-    print(f"\nðŸ“Š Model Performance:")
+    print(f"\n📊 Model Performance:")
     print(f"   Accuracy: {accuracy:.3f}")
     
-    print(f"\nðŸ“‹ Classification Report:")
+    print(f"\n📋 Classification Report:")
     print(classification_report(y_test, y_pred, 
-                              target_names=[f"Decrease â‰¥{move_label}", "No Change", f"Increase â‰¥{move_label}"],
+                              target_names=[f"Decrease ≥{move_label}", "No Change", f"Increase ≥{move_label}"],
                               labels=[-1, 0, 1], zero_division=0))
     print_confidence_report(y_test, y_pred, confidence)
     
     # Feature importance from Random Forest
     # Apply balanced class_weight via sample_weight (works on cuML RF and sklearn RF)
-    _fit_with_balanced_sample_weight(rf, X_train, y_train)
+    rf = _fit_with_balanced_sample_weight(rf, X_train, y_train)
     feature_importance = pd.DataFrame({
         'feature': feature_cols,
         'importance': rf.feature_importances_
     }).sort_values('importance', ascending=False)
     
-    print(f"\nðŸ”¥ Top 10 Most Important Features:")
+    print(f"\n🔥 Top 10 Most Important Features:")
     for i, (_, row) in enumerate(feature_importance.head(10).iterrows(), 1):
         print(f"   {i:2d}. {row['feature']}: {row['importance']:.4f}")
     
@@ -1685,12 +1684,12 @@ def main():
         best_trade = best_short
         direction = "SHORT (Sell)"
     if best_long.empty and best_short.empty:
-        print("âš ï¸ No high-confidence trade signals found.")
+        print("⚠️ No high-confidence trade signals found.")
         display_forecast_windows(raw_df, horizon_hours=HORIZON_HOURS)
     else:
         # Output target price and direction only when a trade signal exists.
         row = best_trade.iloc[0]
-        print(f"\nðŸš© Target Trade Signal:")
+        print(f"\n🚩 Target Trade Signal:")
         print(f"   Direction: {direction}")
         print(f"   Entry Price: ${row['price']:.2f}")
         print(f"   Target Price (next interval): ${row['future_price']:.2f}")
@@ -1698,10 +1697,10 @@ def main():
         print(f"   Timestamp: {format_display_time(row['date'])}")
         print(f"   Expected Return: {(row['future_price'] - row['price']) / row['price'] * 100:.2f}%")
 
-    print(f"\nâœ… Analysis Complete!")
-    print(f"   ðŸ“Š Dataset: {len(X_train)} train + {len(X_test)} test samples")
-    print(f"   ðŸ¤– Ensemble: 6 algorithms (RF, GB, GB-MinMax, LR-Scaled, SVM, ExtraTrees)")
-    print(f"   ðŸ“ˆ Features: {len(feature_cols)} technical indicators")
+    print(f"\n✅ Analysis Complete!")
+    print(f"   📊 Dataset: {len(X_train)} train + {len(X_test)} test samples")
+    print(f"   🤖 Ensemble: 6 algorithms (RF, GB, GB-MinMax, LR-Scaled, SVM, ExtraTrees)")
+    print(f"   📈 Features: {len(feature_cols)} technical indicators")
 
     # --- Persist fitted state to disk so the next run can short-circuit predict. ---
     # Errors here must NEVER break the prediction run -- the state cache is a nice-to-have,
@@ -1717,10 +1716,10 @@ def main():
             accuracy=float(accuracy),
             metadata={"trigger": "main-end"},
         )
-        print(f"   ðŸ’¾ Model state saved to {_modstate_path}")
+        print(f"   💾 Model state saved to {_modstate_path}")
     except Exception as _modstate_exc:
         # Never let a state-cache failure block a prediction. One-line log only.
-        print(f"   âš ï¸  Model state save skipped: {type(_modstate_exc).__name__}: {_modstate_exc}")
+        print(f"   ⚠️  Model state save skipped: {type(_modstate_exc).__name__}: {_modstate_exc}")
 
 
 if __name__ == "__main__":

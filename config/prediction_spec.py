@@ -15,7 +15,7 @@ from __future__ import annotations
 #          explicitly opting in via SHARED).
 # ---------------------------------------------------------------------------
 HORIZON_MINUTES: int = 15
-PCT_THRESHOLD: float = 0.015           # ±1.50% (raised from ±0.10% to reduce label noise)
+PCT_THRESHOLD: float = 0.0015          # 0.15 percent
 TIMEFRAME_LABEL: str = f"{HORIZON_MINUTES} minutes"
 
 # ---------------------------------------------------------------------------
