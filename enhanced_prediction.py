@@ -1498,7 +1498,7 @@ def main():
     
     # --- Fast path: serve a cached state from a previous run ---------------------
     # To enable: set the environment variable FAST_PATH_MODEL_STATE=1. The cached
-    # state is honoured only when it is younger than MAX_STATE_AGE_HOURS (default 0.5 h).
+    # state is honoured only when it is no older than MAX_STATE_AGE_HOURS (default 72 h).
     # On any failure (missing file, schema mismatch, too-old state, decode error, or
     # feature-set mismatch with the current dataset) the fast path is bypassed silently
     # and the normal scaler-evaluation path runs -- it never blocks a prediction.
@@ -1506,7 +1506,7 @@ def main():
         try:
             import datetime as _dt_fp
             from services.model_state import load_state as _load_state, ModelStateError as _fp_ModelStateError
-            max_age_hours = float(os.environ.get("MAX_STATE_AGE_HOURS", "0.5"))
+            max_age_hours = float(os.environ.get("MAX_STATE_AGE_HOURS", "72"))
             _state = _load_state()
             _age_s = (_dt_fp.datetime.now(_dt_fp.timezone.utc) - _state.saved_at).total_seconds()
             if _age_s > max_age_hours * 3600:
