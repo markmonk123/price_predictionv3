@@ -245,8 +245,8 @@ def format_display_time(timestamp):
     return ts.tz_convert(DISPLAY_TZ).strftime('%Y-%m-%d %I:%M:%S %p %Z')
 
 
-def display_forecast_windows(price_df, horizon_hours=HORIZON_HOURS):
-    """Display 15-minute forecast windows when no trade signal is available."""
+def display_forecast_windows(price_df, horizon_hours=HORIZON_HOURS, history=None):
+    """Display price forecasts at 15-minute intervals."""
     try:
         from enhanced_forecasting import EnhancedBitcoinForecaster
     except Exception as e:
@@ -257,10 +257,10 @@ def display_forecast_windows(price_df, horizon_hours=HORIZON_HOURS):
         forecast_input = price_df[['date', 'price']].copy()
         current_price = pd.to_numeric(forecast_input['price'], errors='coerce').dropna().iloc[-1]
 
-        print("\n🔮 No high-confidence trade signal. Generating forecast windows instead...")
+        print("\n🔮 Generating price forecast windows...")
         forecaster = EnhancedBitcoinForecaster()
 
-        if not forecaster.train_models(forecast_input, horizon_hours=horizon_hours):
+        if not forecaster.prepare_models(forecast_input, horizon_hours=horizon_hours):
             print("⚠️ Forecast window generation failed during model training.")
             return False
 
@@ -268,6 +268,10 @@ def display_forecast_windows(price_df, horizon_hours=HORIZON_HOURS):
         if forecast_df is None or forecast_df.empty:
             print("⚠️ Forecast window generation failed during inference.")
             return False
+
+        current_price = forecaster.forecast_reference_price
+        if history is not None:
+            history.forecast(forecast_df, forecaster, current_price)
 
         forecast_stats = forecaster.calculate_forecast_statistics(
             forecast_df, current_price=current_price, horizon_hours=horizon_hours
@@ -330,7 +334,7 @@ def horizon_to_steps(horizon_minutes, bar_minutes=BAR_MINUTES):
     return max(int(round(float(horizon_minutes) / float(bar_minutes))), 1)
 
 
-def create_enhanced_features(df, pct_threshold=PCT_THRESHOLD, horizon_steps=HORIZON_MINUTES):
+def create_enhanced_features(df, pct_threshold=PCT_THRESHOLD, horizon_steps=HORIZON_MINUTES, include_unlabeled=False):
     """Create comprehensive technical indicators for Bitcoin 1-minute interval prediction.
     Requires numpy, pandas, and scipy.stats. Raises ImportError if unavailable.
     """
@@ -467,6 +471,9 @@ def create_enhanced_features(df, pct_threshold=PCT_THRESHOLD, horizon_steps=HORI
     df = df.replace([np.inf, -np.inf], np.nan)
     df['next_return'] = (df['future_price'] - df['price']) / df['price']
     
+    if include_unlabeled:
+        feature_columns = [c for c in df.columns if c not in ('future_price', 'next_return', 'target')]
+        return df.dropna(subset=feature_columns)
     return df.dropna()
 
 
@@ -1270,6 +1277,14 @@ def main():
     
     # Get data and create features
     raw_df = fetch_bitcoin_data(num_points=NUM_DATA_POINTS, interval_minutes=BAR_MINUTES)
+    # Coinbase candle timestamps are OPEN times; exclude unfinished input bars.
+    _history_now = pd.Timestamp.now(tz='UTC')
+    raw_df = raw_df.loc[pd.to_datetime(raw_df['date'], utc=True) + pd.Timedelta(minutes=BAR_MINUTES) <= _history_now].copy()
+    if raw_df.empty:
+        raise RuntimeError('No completed market candles available')
+    from services.history_runtime import HistoryRuntime, model_identity
+    history = HistoryRuntime(__file__, raw_df)
+
     print(f"📊 Fetched {len(raw_df)} data points of Bitcoin data at {BAR_MINUTES}-minute intervals")
 
     # Hardcoded label spec -- the auto-search (evaluate_threshold_horizon_grid)
@@ -1282,21 +1297,27 @@ def main():
     selected_horizon = HORIZON_MINUTES
     move_label = f"{selected_threshold * 100:.3f}%"
 
-    df = create_enhanced_features(
+    live_df = create_enhanced_features(
         raw_df,
         pct_threshold=selected_threshold,
         horizon_steps=horizon_to_steps(selected_horizon),
+        include_unlabeled=True,
     )
+    df = live_df.dropna(subset=['future_price', 'next_return', 'target']).copy()
     print(f"⚙️  Created {len(df.columns)-3} technical features")  # -3 for date, price, target
     print(f"🎯 Training label: next {selected_horizon} minute(s), move threshold ±{move_label}")
+
+    if live_df.empty or live_df['date'].iloc[-1] != raw_df['date'].iloc[-1]:
+        raise RuntimeError('Latest completed candle does not have valid inference features')
 
     # --- Rule-Based LONG Signal: DPO > 0 AND LR Slope > 0 AND DI+ > DI- AND ADX >= 25 AND MACD Hist > 0 ---
     print("\n📡 Rule-Based LONG Signal (DPO > 0 AND LR Slope > 0 AND DI+ > DI- AND ADX ≥ 25 AND MACD Hist > 0):")
     try:
-        long_signals_rule = identify_long_signal(df, adx_threshold=25, lr_period=30)
+        long_signals_rule = identify_long_signal(live_df, adx_threshold=25, lr_period=30)
         if not long_signals_rule.empty:
             latest = long_signals_rule.iloc[-1]
             hl_window = calculate_next_hl_window(latest)
+            history.rule("long", latest, 1, hl_window, selected_horizon)
             print(f"   ✅ LONG Signal Detected!")
             print(f"   Entry Price  : ${latest['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest['date'])}")
@@ -1328,10 +1349,11 @@ def main():
     # --- Rule-Based Short Signal: DI- > DI+, DPO < 0, ADX >= 25, MACD Hist < 0 ---
     print("\n📡 Rule-Based SHORT Signal (DI- > DI+ AND DPO < 0 AND ADX ≥ 25 AND MACD Hist < 0):")
     try:
-        short_signals_rule = identify_short_signal(df, adx_threshold=25)
+        short_signals_rule = identify_short_signal(live_df, adx_threshold=25)
         if not short_signals_rule.empty:
             latest_s = short_signals_rule.iloc[-1]
             hl_window_s = calculate_next_hl_window(latest_s)
+            history.rule("short", latest_s, -1, hl_window_s, selected_horizon)
             print(f"   🔴 SHORT Signal Detected!")
             print(f"   Entry Price  : ${latest_s['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest_s['date'])}")
@@ -1356,10 +1378,11 @@ def main():
     # --- Short Signal (LRS Variant): DI- > DI+, LR Slope < 0, ADX >= 25, MACD Hist < 0 ---
     print("\n📡 SHORT Signal — LRS Divergence (DI- > DI+ AND LR Slope < 0 AND ADX ≥ 25 AND MACD Hist < 0):")
     try:
-        short_lrs_rule = identify_short_signal_lrs(df, adx_threshold=25, lr_period=30)
+        short_lrs_rule = identify_short_signal_lrs(live_df, adx_threshold=25, lr_period=30)
         if not short_lrs_rule.empty:
             latest_sl = short_lrs_rule.iloc[-1]
             hl_window_sl = calculate_next_hl_window(latest_sl)
+            history.rule("short_lrs", latest_sl, -1, hl_window_sl, selected_horizon)
             print(f"   🔴 SHORT (LRS) Signal Detected!")
             print(f"   Entry Price  : ${latest_sl['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest_sl['date'])}")
@@ -1385,10 +1408,11 @@ def main():
     # --- Long Signal (DPO Variant): DI+ > DI-, DPO > 0, ADX >= 25, MACD Hist > 0 [inverse of SHORT primary] ---
     print("\n📡 LONG Signal — DPO Only (DI+ > DI- AND DPO > 0 AND ADX ≥ 25 AND MACD Hist > 0):")
     try:
-        long_dpo_rule = identify_long_signal_dpo(df, adx_threshold=25)
+        long_dpo_rule = identify_long_signal_dpo(live_df, adx_threshold=25)
         if not long_dpo_rule.empty:
             latest_ld = long_dpo_rule.iloc[-1]
             hl_window_ld = calculate_next_hl_window(latest_ld)
+            history.rule("long_dpo", latest_ld, 1, hl_window_ld, selected_horizon)
             print(f"   ✅ LONG (DPO) Signal Detected!")
             print(f"   Entry Price  : ${latest_ld['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest_ld['date'])}")
@@ -1414,10 +1438,11 @@ def main():
     # --- Long Signal (LRS Variant): DI+ > DI-, LR Slope > 0, ADX >= 25, MACD Hist > 0  [inverse of SHORT LRS] ---
     print("\n📡 LONG Signal — LRS Divergence (DI+ > DI- AND LR Slope > 0 AND ADX ≥ 25 AND MACD Hist > 0):")
     try:
-        long_lrs_rule = identify_long_signal_lrs(df, adx_threshold=25, lr_period=30)
+        long_lrs_rule = identify_long_signal_lrs(live_df, adx_threshold=25, lr_period=30)
         if not long_lrs_rule.empty:
             latest_ll = long_lrs_rule.iloc[-1]
             hl_window_ll = calculate_next_hl_window(latest_ll)
+            history.rule("long_lrs", latest_ll, 1, hl_window_ll, selected_horizon)
             print(f"   ✅ LONG (LRS) Signal Detected!")
             print(f"   Entry Price  : ${latest_ll['price']:.2f}")
             print(f"   Timestamp    : {format_display_time(latest_ll['date'])}")
@@ -1477,12 +1502,18 @@ def main():
             _missing = [c for c in _feature_cols if c not in df.columns]
             if _missing:
                 raise RuntimeError(f"cached state expects {len(_missing)} feature(s) missing from current data: {_missing[:5]}")
-            _X_latest = df[_feature_cols].iloc[[-1]]
-            _y_proba = _state.ensemble.predict_proba(_X_latest)[0]
-            _y_pred = int(np.argmax(_y_proba)) - 1   # classes were [-1, 0, 1] -> probs order matches
-            _conf = float(np.max(_y_proba))
+            _X_latest = live_df[_feature_cols].iloc[[-1]]
+            _identity = model_identity('classifier', _state.saved_at, cached=True)
+            _identity.update(_state.metadata.get('history_identity', {}))
+            _identity['cached'] = True
+            _y_pred, _conf = history.classifier(
+                _state.ensemble, _X_latest, live_df.iloc[-1], selected_horizon,
+                selected_threshold, _identity,
+            )
             print(f"   ⚡ Fast-path predict (cache {_age_s:.1f}s old, schema v{_state.schema_version}): direction={_y_pred:+d}  confidence={_conf:.2%}")
             print(f"   📦 Reused ensemble: {_state.ensemble.__class__.__name__}, booster: {_state.booster.__class__.__name__}, scalers: {len(list(_state.scaler_results))}")
+            display_forecast_windows(raw_df, horizon_hours=HORIZON_HOURS, history=history)
+            history.finish()
             # Note: we deliberately do NOT save again here (no fresh training happened).
             # The cached state remains valid; the next normal run will refresh it.
             return
@@ -1501,8 +1532,8 @@ def main():
     print(f"\n🤝 Multi-Scaler Ensemble Confidence Booster (3 scalers × 3 models = 9 voters)")
     booster = EnsembleConfidenceBooster(scaler_results, X_train, y_train)
     
-    # Get latest test row for ensemble prediction
-    latest_test_row = X_test.iloc[-1] if len(X_test) > 0 else X_test.iloc[-1]
+    # Predict from the latest completed candle without requiring a future label
+    latest_test_row = live_df[feature_cols].iloc[-1]
     boost_dir, boost_conf, boost_breakdown = booster.predict_with_boost(latest_test_row)
     
     print(f"   Ensemble Verdict: {'+1 LONG' if boost_dir==1 else ('-1 SHORT' if boost_dir==-1 else '0 NEUTRAL')}")
@@ -1589,6 +1620,21 @@ def main():
     ensemble = fit_calibrated_classifier(ensemble, X_train, y_train, desired_splits=3)
     
     # Predictions
+    _training_cutoff = pd.to_datetime(df.iloc[len(X_train) - 1]['date'], utc=True) + pd.Timedelta(minutes=BAR_MINUTES + selected_horizon)
+    _identity = model_identity('classifier', pd.Timestamp.now(tz='UTC'), _training_cutoff)
+    _live_direction, _live_confidence = history.classifier(
+        ensemble, live_df[feature_cols].iloc[[-1]], live_df.iloc[-1],
+        selected_horizon, selected_threshold, _identity,
+    )
+    print(f"Current classifier prediction: direction={_live_direction:+d} confidence={_live_confidence:.2%}")
+    history.prediction(
+        kind='direction', signal='confidence_booster',
+        target_start=int(pd.Timestamp(live_df.iloc[-1]['date']).timestamp()) + (BAR_MINUTES + selected_horizon) * 60 - 300,
+        target_end=int(pd.Timestamp(live_df.iloc[-1]['date']).timestamp()) + (BAR_MINUTES + selected_horizon) * 60,
+        horizon_minutes=selected_horizon, reference_price=live_df.iloc[-1]['price'],
+        predicted_direction=int(boost_dir), confidence=float(boost_conf),
+        threshold=selected_threshold, model=_identity,
+    )
     y_pred = ensemble.predict(X_test)
     y_proba = ensemble.predict_proba(X_test)
     confidence = np.max(y_proba, axis=1)
@@ -1621,6 +1667,13 @@ def main():
     test_df['predicted'] = y_pred
     test_df['confidence'] = confidence
     test_df['future_price'] = test_df['future_price']  # Already present
+    for _, _row in test_df.iterrows():
+        _end = int(pd.Timestamp(_row['date']).timestamp()) + (BAR_MINUTES + selected_horizon) * 60
+        history.prediction(kind='direction', signal='heldout_classifier', target_start=_end - 300,
+                           target_end=_end, horizon_minutes=selected_horizon, reference_price=_row['price'],
+                           predicted_direction=int(_row['predicted']), confidence=float(_row['confidence']),
+                           threshold=selected_threshold, historical=True, model=_identity)
+
 
     # Find high-confidence long and short signals
     long_signals = test_df[(test_df['predicted'] == 1) & (test_df['confidence'] >= 0.7)]
@@ -1647,17 +1700,27 @@ def main():
         direction = "SHORT (Sell)"
     if best_long.empty and best_short.empty:
         print("⚠️ No high-confidence trade signals found.")
-        display_forecast_windows(raw_df, horizon_hours=HORIZON_HOURS)
+        display_forecast_windows(raw_df, horizon_hours=HORIZON_HOURS, history=history)
     else:
         # Output target price and direction only when a trade signal exists.
         row = best_trade.iloc[0]
-        print(f"\n🚩 Target Trade Signal:")
+        _trade_end = int(pd.Timestamp(row['date']).timestamp()) + (BAR_MINUTES + selected_horizon) * 60
+        history.prediction(kind='trade', signal='best_heldout_trade', target_start=_trade_end - 300,
+                           target_end=_trade_end, horizon_minutes=selected_horizon, reference_price=row['price'],
+                           predicted_direction=int(row['predicted']), confidence=float(row['confidence']),
+                           threshold=selected_threshold, historical=True, model=_identity,
+                           metadata={'displayed_target_is_observed_future': True, 'observed_outcome_price': float(row['future_price'])})
+
+        print(f"\n🚩 Historical Test Trade Signal:")
         print(f"   Direction: {direction}")
         print(f"   Entry Price: ${row['price']:.2f}")
-        print(f"   Target Price (next interval): ${row['future_price']:.2f}")
+        print(f"   Observed Outcome Price: ${row['future_price']:.2f}")
         print(f"   Confidence: {row['confidence']:.1%}")
         print(f"   Timestamp: {format_display_time(row['date'])}")
         print(f"   Expected Return: {(row['future_price'] - row['price']) / row['price'] * 100:.2f}%")
+
+    if not (best_long.empty and best_short.empty):
+        display_forecast_windows(raw_df, horizon_hours=HORIZON_HOURS, history=history)
 
     print(f"\n✅ Analysis Complete!")
     print(f"   📊 Dataset: {len(X_train)} train + {len(X_test)} test samples")
@@ -1676,12 +1739,14 @@ def main():
             feature_cols=feature_cols,
             cv_mean=float(cv_scores.mean()),
             accuracy=float(accuracy),
-            metadata={"trigger": "main-end"},
+            metadata={"trigger": "main-end", "history_identity": _identity},
         )
         print(f"   💾 Model state saved to {_modstate_path}")
     except Exception as _modstate_exc:
         # Never let a state-cache failure block a prediction. One-line log only.
         print(f"   ⚠️  Model state save skipped: {type(_modstate_exc).__name__}: {_modstate_exc}")
+
+    history.finish()
 
 
 if __name__ == "__main__":

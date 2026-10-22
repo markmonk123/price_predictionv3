@@ -44,6 +44,16 @@ $excludeDirs = @('.git', 'ensurepip', 'lib', 'lib64', '.venv', 'node_modules', '
 # --- helpers ------------------------------------------------------------------
 
 function Test-Excluded([string]$rel) {
+    # Never overwrite a runtime ledger (including WAL/SHM/journal sidecars).
+    if ($rel -match '(?i)\.(sqlite3?|db)(-(wal|shm|journal))?$') { return $true }
+    # Also protect a custom in-repo PREDICTION_DB_PATH and its sidecars.
+    if ($env:PREDICTION_DB_PATH) {
+        $dbPath = [IO.Path]::GetFullPath((Join-Path $WIN $rel))
+        $configured = if ([IO.Path]::IsPathRooted($env:PREDICTION_DB_PATH)) {
+            [IO.Path]::GetFullPath($env:PREDICTION_DB_PATH)
+        } else { [IO.Path]::GetFullPath((Join-Path $WIN $env:PREDICTION_DB_PATH)) }
+        if ($dbPath -eq $configured -or $dbPath -in @("$configured-wal", "$configured-shm", "$configured-journal")) { return $true }
+    }
     foreach ($dir in $excludeDirs) {
         if ($rel -eq $dir) { return $true }
         if ($rel -like ("{0}/*" -f $dir)) { return $true }

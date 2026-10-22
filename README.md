@@ -203,6 +203,65 @@ system = ContinuousTrainingSystem(update_interval=120)
 sentiment = forecaster.analyze_market_sentiment(data, window_hours=4)
 ```
 
+## Prediction history and accuracy
+
+Both `enhanced_prediction.py` and `priceprediction.py` automatically save their
+outputs to `data/predictions.sqlite3`. Override the location with
+`PREDICTION_DB_PATH`. The database is independent of the 72-hour model caches;
+keep it when deleting or refreshing fitted models.
+
+Each run first scores pending predictions against completed Coinbase five-minute
+candles, fetching missing historical ranges as needed. A price forecast labeled
+18:00 is scored against the close of the **18:00–18:15** window. Missing candles
+remain pending; actual prices are never interpolated. Classifications keep their
+native outcome horizon, while high/low forecasts use the next 15-minute window.
+Scoring happens when you run a prediction again; no background scheduler is added.
+
+The ledger retains overlapping forecasts from separate runs and the displayed,
+baseline-adjusted ensemble prices. It records model identity, training cutoff,
+cache use, confidence, and live/historical status. Historical test predictions
+and outcomes already known when generated are excluded from live summaries.
+The displayed historical trade outcome is an observed price, not a price forecast.
+Older model caches may have an unknown training cutoff until refreshed.
+
+From the repository root, using the same Python environment as the models:
+
+```bash
+# Live accuracy summary, grouped by output type and horizon
+python -m services.prediction_history
+
+# Export predictions alongside actuals, errors, and pending/scored status
+python -m services.prediction_history --csv predictions.csv
+
+# Six-hour price forecasts from runs in October (exclusive end date, UTC)
+python -m services.prediction_history --kind price --horizon 360 \
+  --start 2026-10-01 --end 2026-11-01 --csv six-hour.csv
+
+# Include historical evaluations, or select one model version/database
+python -m services.prediction_history --history all
+python -m services.prediction_history --model-version VERSION --db /path/to/history.sqlite3
+```
+
+Percentage error is `100 * (predicted - actual) / actual`; success means absolute
+error at most **1%**. Reports include MAE, RMSE, MAPE, direction accuracy and sample
+counts, with high/low endpoint errors and range containment where applicable.
+Trade reports show underlying market returns, not simulated trading profits.
+CSV timestamps are UTC; model terminal timestamps remain America/New_York.
+Date filters select run generation times. CSV exports include pending records.
+
+Git and `scripts/sync-to-wsl.ps1` exclude SQLite databases and sidecar files so a
+code sync cannot replace WSL history. Windows and WSL use separate local ledgers
+by default. For custom filenames without a database extension, set
+`PREDICTION_DB_PATH` in the sync shell too and add a Git ignore rule, or keep the
+database outside the repository. Back up the runtime database separately.
+
+Tests (no network or full model training):
+
+```bash
+python -m unittest test_prediction_history -v
+python -m unittest test_history_integration test_forecasting_backends -v
+```
+
 ## 📝 License
 
 This project is open source and available under the MIT License.

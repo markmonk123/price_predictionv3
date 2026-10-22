@@ -4,3 +4,11 @@ __pycache__/
 # Persisted fitted-model state cache for enhanced_prediction.py.
 # See services/model_state.py for the save/load API and schema_version.
 services/_state/
+
+# Runtime prediction history and SQLite journals must stay local.
+*.sqlite3
+*.sqlite3-*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*

@@ -12,7 +12,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.pipeline import Pipeline
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -80,6 +80,8 @@ class EnhancedBitcoinForecaster:
         self.models = {}
         self.trained_models = {}
         self.last_update = None
+        self.history_identity = {}
+        self.forecast_reference_price = None
 
         # Ensemble base models. Each entry is a thunk (zero-arg callable)
         # that returns the estimator instance -- this defers backend selection
@@ -170,11 +172,17 @@ class EnhancedBitcoinForecaster:
         out = out.dropna(subset=['date', 'price']).sort_values('date')
         out = out.drop_duplicates(subset='date', keep='last')
 
-        # Snap to 15-minute windows and preserve all windows via interpolation/fill.
+        # Only completed 15-minute windows are valid training/inference inputs.
+        spacing = out['date'].diff().dropna()
+        spacing = spacing[spacing > pd.Timedelta(0)]
+        bar_size = spacing.median() if not spacing.empty else pd.Timedelta(minutes=5)
+        complete_until = min(out['date'].max() + bar_size, pd.Timestamp.now(tz='UTC'))
+        # Snap to 15-minute windows and preserve past missing windows via forward fill.
         out = out.set_index('date').resample('15min').last()
         # No backward fill, no time interpolation across the full grid -- both leak future observations into the past.
         # Forward-fill only so each missing bar carries the most recent past observed price.
         out['price'] = out['price'].ffill()
+        out = out.loc[out.index + pd.Timedelta(minutes=15) <= complete_until]
         out = out.reset_index()
         return out
 
@@ -280,6 +288,49 @@ class EnhancedBitcoinForecaster:
 
         return prepared, feature_cols, target_cols
 
+    def prepare_models(self, df, horizon_hours=HORIZON_HOURS):
+        """Reuse fitted forecast models in fast mode; train on a cache miss."""
+        import os
+        import time
+        from pathlib import Path
+        from services.model_state import _atomic_write_joblib
+        import joblib
+
+        fast = os.environ.get("FAST_PATH_MODEL_STATE", "").lower() in ("1", "true", "yes")
+        cache_path = Path(__file__).resolve().parent / "services" / "_state" / "forecast_state.joblib"
+        if fast:
+            try:
+                state = joblib.load(cache_path)
+                age = time.time() - state["saved_at"]
+                max_age = float(os.environ.get("MAX_STATE_AGE_HOURS", "72")) * 3600
+                if (state["schema_version"] == 1 and state["horizon_hours"] == horizon_hours
+                        and 0 <= age <= max_age and state["trained_models"]):
+                    self.trained_models = state["trained_models"]
+                    from services.history_runtime import model_identity
+                    self.history_identity = state.get('history_identity') or model_identity(
+                        'forecast', state['saved_at'], cached=True)
+                    self.history_identity = dict(self.history_identity, cached=True)
+                    print(f"   Reusing cached forecast models ({age / 3600:.2f}h old)")
+                    return True
+                print("   Forecast cache expired or incompatible; training forecast models.")
+            except Exception as exc:
+                print(f"   Forecast cache unavailable ({exc}); training forecast models.")
+
+        if not self.train_models(df, horizon_hours=horizon_hours):
+            return False
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_joblib(cache_path, {
+                "schema_version": 1,
+                "saved_at": time.time(),
+                "horizon_hours": horizon_hours,
+                "trained_models": self.trained_models,
+                "history_identity": self.history_identity,
+            }, compress=3, overwrite=True)
+        except Exception as exc:
+            print(f"   Forecast cache save skipped: {exc}")
+        return True
+
     def train_models(self, df, horizon_hours=HORIZON_HOURS):
         """Train ensemble models for requested horizon."""
         forecast_horizon = horizon_hours * 4
@@ -318,7 +369,11 @@ class EnhancedBitcoinForecaster:
                 print(f"Failed: {e}")
 
         print(f"   ✅ Successfully trained {len(self.trained_models)} models")
-        self.last_update = datetime.now()
+        self.last_update = datetime.now(timezone.utc)
+        from services.history_runtime import model_identity
+        # Last training label is the furthest target of the last training row.
+        cutoff = pd.to_datetime(prepared_df.iloc[len(X_train) - 1]['date'], utc=True) + timedelta(minutes=15 * (forecast_horizon + 1))
+        self.history_identity = model_identity('forecast', self.last_update, cutoff)
         return len(self.trained_models) > 0
 
     def generate_forecast(self, latest_data, horizon_hours=HORIZON_HOURS):
@@ -352,6 +407,7 @@ class EnhancedBitcoinForecaster:
         ensemble_avg = np.mean(ensemble_predictions, axis=0)
         ensemble_std = np.std(ensemble_predictions, axis=0) if len(ensemble_predictions) > 1 else np.zeros(steps)
         current_price = float(pd.to_numeric(df_feat['price'], errors='coerce').dropna().iloc[-1])
+        self.forecast_reference_price = current_price
         raw_first_prediction = float(ensemble_avg[0]) if len(ensemble_avg) > 0 else current_price
         baseline_gap_pct = 0.0
         baseline_adjusted = False
