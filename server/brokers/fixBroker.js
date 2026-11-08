@@ -1,12 +1,28 @@
 /**
- * FIX Protocol Service for Bitcoin Trading Platform
- * Implements FIX protocol for market data and order execution
+ * FIX protocol adapter: NOT WIRED IN. Kept for when FIX API access is granted.
+ *
+ * Status: written against a QuickFIX-style engine ('quick-fix'), but no such
+ * package exists on npm. To activate, pick a real engine (e.g. jspurefix), port
+ * the message building below to it, wrap it in the broker interface used by
+ * paperBroker.js / coinbaseBroker.js (preview, place, cancel, get, list,
+ * account), and register it in server.js.
  */
 
-const QuickFIX = require('quick-fix');
 const NodeCache = require('node-cache');
-const { logMessage, logError } = require('../utils/logger');
-const { isDemoMode } = require('../utils/runtimeMode');
+const { logMessage, logError } = require('../../utils/logger');
+
+// Loaded lazily so nothing breaks while no FIX engine is installed.
+let QuickFIX = null;
+const loadFixLibrary = () => {
+  if (!QuickFIX) {
+    try {
+      QuickFIX = require('quick-fix');
+    } catch (error) {
+      throw new Error(`FIX library 'quick-fix' is not installed; live FIX trading is unavailable (${error.message})`);
+    }
+  }
+  return QuickFIX;
+};
 
 // Cache for storing latest market data
 const marketDataCache = new NodeCache({ stdTTL: 300 }); // 5 minutes TTL
@@ -29,6 +45,7 @@ let isConnected = false;
 const initializeFixSession = async () => {
   try {
     logMessage('Initializing FIX session...');
+    const FIX = loadFixLibrary();
 
     const fixConfig = {
       SenderCompID: 'BITCOIN_PREDICTION_CLIENT',
@@ -36,13 +53,6 @@ const initializeFixSession = async () => {
       HeartBtInt: 30,  // Heartbeat interval in seconds
       ReconnectInterval: 5  // Reconnect interval in seconds
     };
-
-    // Create FIX initiator
-    const fixInitiator = new QuickFIX.Initiator(
-      new QuickFIX.FileStoreFactory('./fixlogs'),
-      new QuickFIX.FileLogFactory('./fixlogs'),
-      new QuickFIX.Dictionary(fixConfig)
-    );
 
     // Define application callbacks
     const fixApplication = {
@@ -80,6 +90,15 @@ const initializeFixSession = async () => {
         return true;
       }
     };
+
+    // Create FIX initiator. The application callbacks must be registered here,
+    // otherwise onCreate/onLogon never fire and the session never connects.
+    const fixInitiator = new FIX.Initiator(
+      fixApplication,
+      new FIX.FileStoreFactory('./fixlogs'),
+      new FIX.Dictionary(fixConfig),
+      new FIX.FileLogFactory('./fixlogs')
+    );
 
     // Start the FIX initiator
     fixInitiator.start();
@@ -206,7 +225,8 @@ const subscribeToMarketData = (symbol) => {
     logMessage(`Subscribing to market data for ${symbol}...`);
 
     // Create market data request message
-    const message = new QuickFIX.Message();
+    const FIX = loadFixLibrary();
+    const message = new FIX.Message();
     message.getHeader().setField(35, FIX_MSG_TYPES.MARKET_DATA_REQUEST); // MsgType
 
     // Set message fields
@@ -228,7 +248,7 @@ const subscribeToMarketData = (symbol) => {
     });
 
     // Send the message
-    QuickFIX.Session.sendToTarget(message, fixSession);
+    FIX.Session.sendToTarget(message, fixSession);
 
     logMessage(`Market data subscription request sent for ${symbol}`);
     return true;
@@ -250,7 +270,8 @@ const sendOrder = async (orderData) => {
     const { symbol, side, orderType, quantity, price, timeInForce } = orderData;
 
     // Create new order single message
-    const message = new QuickFIX.Message();
+    const FIX = loadFixLibrary();
+    const message = new FIX.Message();
     message.getHeader().setField(35, FIX_MSG_TYPES.NEW_ORDER_SINGLE); // MsgType
 
     // Set message fields
@@ -276,7 +297,7 @@ const sendOrder = async (orderData) => {
     message.setField(59, tifMap[timeInForce] || '0'); // TimeInForce
 
     // Send the message
-    QuickFIX.Session.sendToTarget(message, fixSession);
+    FIX.Session.sendToTarget(message, fixSession);
 
     logMessage(`Order sent: ${JSON.stringify(orderData)}`);
     return { success: true, orderId: message.getField(11) };
@@ -287,75 +308,19 @@ const sendOrder = async (orderData) => {
 };
 
 /**
- * Get latest market data
+ * Get latest market data received over FIX
  */
 const getMarketData = async (symbol = 'BTC/USD') => {
   const cachedData = marketDataCache.get(symbol);
-
   if (cachedData) {
     return cachedData;
   }
-
-  if (isDemoMode) {
-    // If no cached data, simulate market data in demo mode only.
-    return simulateMarketData(symbol);
-  }
-
-  throw new Error(`No live market data available for ${symbol} and DEMO_MODE is disabled`);
-};
-
-/**
- * Simulate market data for demo purposes
- */
-const simulateMarketData = (symbol) => {
-  const basePrice = 60000 + (Math.random() * 10000 - 5000);
-  const spread = basePrice * 0.0005; // 0.05% spread
-
-  const marketData = {
-    symbol,
-    timestamp: new Date(),
-    bid: basePrice - spread/2,
-    ask: basePrice + spread/2,
-    last: basePrice,
-    mid: basePrice,
-    volume: 10 + Math.random() * 100,
-    receivedAt: new Date(),
-    simulated: true // Flag to indicate this is simulated data
-  };
-
-  // Cache the simulated data
-  marketDataCache.set(symbol, marketData);
-
-  return marketData;
-};
-
-/**
- * Schedule regular market data updates
- */
-const scheduleMarketDataUpdates = (io) => {
-  // Update every 5 seconds for demo purposes
-  const updateInterval = 5000;
-
-  setInterval(async () => {
-    try {
-      const marketData = await getMarketData('BTC/USD');
-
-      // Broadcast to all connected clients
-      if (io) {
-        io.emit('marketData', marketData);
-      }
-    } catch (error) {
-      logError('Error in scheduled market data update:', error);
-    }
-  }, updateInterval);
-
-  logMessage(`Scheduled market data updates every ${updateInterval/1000} seconds`);
+  throw new Error(`No FIX market data available for ${symbol}`);
 };
 
 module.exports = {
   initializeFixSession,
   subscribeToMarketData,
   sendOrder,
-  getMarketData,
-  scheduleMarketDataUpdates
+  getMarketData
 };

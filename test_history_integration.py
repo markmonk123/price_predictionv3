@@ -128,7 +128,7 @@ class IntegrationTests(unittest.TestCase):
                                'long_signal_dpo', 'long_signal_lrs'):
                     kwargs = {'adx_threshold': 25}
                     if signal in ('long_signal', 'short_signal_lrs', 'long_signal_lrs'):
-                        kwargs['lr_period'] = 6 if name == 'enhanced_prediction' else 30
+                        kwargs['lr_period'] = 6  # 30 minutes of 5-minute bars
                     detected = getattr(module, 'identify_' + signal)(live, **kwargs)
                     self.assertIsInstance(detected, pd.DataFrame)
 

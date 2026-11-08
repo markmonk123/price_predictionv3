@@ -13,7 +13,10 @@
 
     },
     "python.testing.pytestArgs": [
-        "python"
+        "test_prediction_history.py",
+        "test_history_integration.py",
+        "test_forecasting_backends.py",
+        "test_class_balancing.py"
     ],
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
@@ -21,19 +24,18 @@
         {
             "name": "redis (docker)",
             "type": "docker",
-            "port": 8000,
+            "port": 6379,
             "useDocker": {
                 "pathToComposeFile": {
                     "$mid": 1,
-                    "path": "/workspaces/price_predictionv3/docker-compose.yml",
-                    "scheme": "vscode-remote",
-                    "authority": "codespaces+ideal-lamp-7vvx79rjggrp2xpgx"
+                    "path": "/d:/Github Longterm Storage/priceprediction-noncontainer/price_predictionv3/docker-compose.yml",
+                    "scheme": "file"
                 },
                 "selectedContainerName": "bitcoin-fix-redis-dev",
                 "serviceName": "redis"
             },
             "healthCheckPath": "/healthcheck",
-            "enableHealthCheck": true,
+            "enableHealthCheck": false,
             "healthCheckInterval": 10000
         }
     ],

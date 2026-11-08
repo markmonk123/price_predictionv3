@@ -895,12 +895,15 @@ def _fit_with_balanced_sample_weight(estimator, X, y, **fit_kwargs):
             return estimator.fit(X, y, **{f"{last_name}__sample_weight": sw}, **fit_kwargs)
         except (TypeError, ValueError) as exc:
             # The final step rejected sample_weight (e.g. cuML classifier wrapped
-            # in a sklearn Pipeline). Fall back to plain fit, applying sample_weight
-            # to the wrapped sklearn estimator upstream if possible.
+            # in a sklearn Pipeline). Fit the preprocessing steps, then fit the
+            # final step on the TRANSFORMED features so train and predict see the
+            # same inputs, and keep whatever estimator that fit returns (it may
+            # be a weighted CPU forest fallback).
             _emit_sample_weight_skip_warning(cls, backend, exc)
             try:
-                _fit_with_balanced_sample_weight(last_est, X, y)
-                estimator.steps[-1] = (last_name, last_est)
+                Xt = estimator[:-1].fit_transform(X, y) if len(estimator.steps) > 1 else X
+                fitted_last = _fit_with_balanced_sample_weight(last_est, Xt, y)
+                estimator.steps[-1] = (last_name, fitted_last)
                 return estimator
             except Exception:
                 return estimator.fit(X, y, **fit_kwargs)
@@ -1735,12 +1738,14 @@ def main():
     test_df['predicted'] = y_pred
     test_df['confidence'] = confidence
     test_df['future_price'] = test_df['future_price']  # Already present
+    _heldout = []
     for _, _row in test_df.iterrows():
         _end = int(pd.Timestamp(_row['date']).timestamp()) + (BAR_MINUTES + selected_horizon) * 60
-        history.prediction(kind='direction', signal='heldout_classifier', target_start=_end - 300,
-                           target_end=_end, horizon_minutes=selected_horizon, reference_price=_row['price'],
-                           predicted_direction=int(_row['predicted']), confidence=float(_row['confidence']),
-                           threshold=selected_threshold, historical=True, model=_identity)
+        _heldout.append(dict(kind='direction', signal='heldout_classifier', target_start=_end - 300,
+                             target_end=_end, horizon_minutes=selected_horizon, reference_price=_row['price'],
+                             predicted_direction=int(_row['predicted']), confidence=float(_row['confidence']),
+                             threshold=selected_threshold, historical=True, model=_identity))
+    history.predictions(_heldout)
 
 
     # Find high-confidence long and short signals

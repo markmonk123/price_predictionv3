@@ -50,6 +50,27 @@ def parse_arguments():
     return parser.parse_args()
 
 
+def to_naive_utc(timestamp):
+    """Normalize None / ISO string / naive / aware datetimes to naive UTC.
+
+    Node passes `new Date().toISOString()` (aware, 'Z'), while candle times are
+    built from epoch seconds; mixing aware and naive datetimes raises TypeError
+    on comparison, so everything is kept as naive UTC internally.
+    """
+    if timestamp is None:
+        return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    if isinstance(timestamp, str):
+        timestamp = parse(timestamp)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return timestamp
+
+
+def utc_from_epoch(seconds):
+    """Epoch seconds -> naive UTC datetime."""
+    return datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc).replace(tzinfo=None)
+
+
 def fetch_recent_market_data(current_price, volume, timestamp, window_size=NUM_DATA_POINTS):
     """
     Fetch recent BTC-USD candles from Coinbase at the spec bar size.
@@ -58,10 +79,7 @@ def fetch_recent_market_data(current_price, volume, timestamp, window_size=NUM_D
     window requires paginating backwards in 300-bar pages until we either hit
     the requested window size or the API runs out of older data.
     """
-    if timestamp is None:
-        timestamp = datetime.datetime.utcnow()
-    elif isinstance(timestamp, str):
-        timestamp = parse(timestamp)
+    timestamp = to_naive_utc(timestamp)
 
     # Coinbase candle endpoint returns [time, low, high, open, close, volume]
     url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
@@ -76,8 +94,8 @@ def fetch_recent_market_data(current_price, volume, timestamp, window_size=NUM_D
 
         params = {
             "granularity": BAR_MINUTES * 60,
-            "start": start_time.isoformat(),
-            "end": end_time.isoformat()
+            "start": start_time.isoformat() + "Z",
+            "end": end_time.isoformat() + "Z"
         }
 
         response = requests.get(url, params=params, timeout=10)
@@ -92,7 +110,7 @@ def fetch_recent_market_data(current_price, volume, timestamp, window_size=NUM_D
         # Coinbase returns each page newest-first, so the LAST row is the
         # oldest candle on the page: step the window back past it.
         oldest_timestamp = min(c[0] for c in page)
-        next_end = datetime.datetime.utcfromtimestamp(oldest_timestamp)
+        next_end = utc_from_epoch(oldest_timestamp)
         if next_end >= end_time:
             # No forward progress (API clamped the range); stop to avoid looping.
             break
@@ -112,7 +130,7 @@ def fetch_recent_market_data(current_price, volume, timestamp, window_size=NUM_D
         raise ValueError(f"Insufficient candle history returned ({len(candles)} rows)")
 
     df = pd.DataFrame({
-        "date": [datetime.datetime.utcfromtimestamp(c[0]) for c in candles],
+        "date": [utc_from_epoch(c[0]) for c in candles],
         "price": [float(c[4]) for c in candles],   # close
         "volume": [float(c[5]) for c in candles]
     })
@@ -127,13 +145,10 @@ def generate_synthetic_data(current_price, volume, timestamp, window_size=NUM_DA
     """
     Generate synthetic price data to feed into the model
     """
-    if timestamp is None:
-        timestamp = datetime.datetime.now()
-    elif isinstance(timestamp, str):
-        timestamp = parse(timestamp)
+    timestamp = to_naive_utc(timestamp)
 
-    # Generate timestamps going back from current time
-    timestamps = [timestamp - datetime.timedelta(minutes=i) for i in range(window_size)]
+    # Generate timestamps going back from current time at the spec bar size
+    timestamps = [timestamp - datetime.timedelta(minutes=i * BAR_MINUTES) for i in range(window_size)]
     timestamps.reverse()  # Oldest first
 
     # Generate price data with some randomness but trending to current price
@@ -175,15 +190,20 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
             df = generate_synthetic_data(price, volume, timestamp, window_size)
             data_source = "synthetic"
 
-        # Create enhanced features
+        # Create enhanced features. Keep the trailing rows whose future price is
+        # not known yet: the last one carries the live price we predict from.
         enhanced_df = create_enhanced_features(
             df,
             pct_threshold=PCT_THRESHOLD,
             horizon_steps=horizon_to_steps(HORIZON_MINUTES),
+            include_unlabeled=True,
         )
+        if enhanced_df.empty or enhanced_df['date'].iloc[-1] != df['date'].iloc[-1]:
+            raise ValueError("Latest candle does not have valid inference features")
+        labeled_df = enhanced_df.dropna(subset=['future_price', 'next_return', 'target'])
 
         # Select features (excluding target variables and non-predictive columns)
-        feature_cols = [col for col in enhanced_df.columns 
+        feature_cols = [col for col in enhanced_df.columns
                        if col not in ['date', 'price', 'future_price', 'next_return', 'target']]
         X = enhanced_df[feature_cols].iloc[-1:]
 
@@ -194,9 +214,9 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
             random_state=42
         )
 
-        # Fit on all data except the last row
-        y_train = enhanced_df['target'][:-1]
-        X_train = enhanced_df[feature_cols][:-1]
+        # Fit only on rows whose outcome is already known
+        y_train = labeled_df['target'].astype(int)
+        X_train = labeled_df[feature_cols]
         model.fit(X_train, y_train)
 
         # Get prediction probabilities for the current price
@@ -217,8 +237,7 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
         # Return result as JSON
         result = {
             "price": float(price),
-            "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime.datetime) else \
-                        datetime.datetime.now().isoformat(),
+            "timestamp": to_naive_utc(timestamp).isoformat() + "Z",
             "predicted_direction": int(prediction),
             "increase_probability": float(increase_prob),
             "decrease_probability": float(decrease_prob),
@@ -239,7 +258,7 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
 
 if __name__ == "__main__":
     args = parse_arguments()
-    timestamp = datetime.datetime.now() if args.time is None else parse(args.time)
+    timestamp = to_naive_utc(args.time)
 
     result = run_prediction(
         price=args.price,

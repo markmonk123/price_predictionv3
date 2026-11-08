@@ -85,6 +85,6 @@ jobs:
           cache-from: type=gha,scope=priceprediction
           cache-to: type=gha,mode=max,scope=priceprediction
       - name: Smoke-test image imports
-        run: docker run --rm --entrypoint python priceprediction:${{ github.sha }} -c "import numpy, pandas, scipy, sklearn, requests, joblib; print('Python runtime imports: OK')"
+        run: docker run --rm --entrypoint python priceprediction:${{ github.sha }} -c "import numpy, pandas, scipy, sklearn, imblearn, requests, joblib, class_balancing, weighted_voting, services.history_runtime; print('Python runtime imports: OK')"
       - name: Check image metadata
         run: docker image inspect priceprediction:${{ github.sha }}

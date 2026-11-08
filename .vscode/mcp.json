@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "priceprediction": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${workspaceFolder}/mcp/server.js"],
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "API_BASE_URL": "http://127.0.0.1:5000/api/v1"
+      }
+    }
+  }
+}

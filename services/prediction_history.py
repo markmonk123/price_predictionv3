@@ -70,11 +70,35 @@ class PredictionHistory:
                              epoch(data_cutoff), str(source), float(reference_price), "BTC-USD"))
         return run_id
 
-    def record(self, run_id, *, kind, signal, target_start, target_end, horizon_minutes,
-               reference_price, model_version, predicted_price=None, predicted_direction=None,
-               predicted_high=None, predicted_low=None, confidence=None, threshold=0,
-               trained_at=None, training_cutoff=None, cached=False, historical=False,
-               metadata=None, generated_at=None):
+    def record(self, run_id, **prediction):
+        self.record_many(run_id, [prediction])
+
+    def record_many(self, run_id, predictions):
+        """Validate and insert predictions in a single transaction.
+
+        Historical (backtest) rows already stored for the same model and window
+        are skipped, so re-running a cached model does not duplicate its
+        held-out evaluation on every run.
+        """
+        rows = [self._values(run_id, **p) for p in predictions]
+        if not rows:
+            return
+        columns = list(rows[0])
+        insert = (f"INSERT OR IGNORE INTO predictions ({','.join(columns)}) "
+                  f"SELECT {','.join('?' for _ in columns)} WHERE ?=0 OR NOT EXISTS ("
+                  "SELECT 1 FROM predictions WHERE historical=1 AND kind=? AND signal=? "
+                  "AND target_start=? AND target_end=? AND model_version=?)")
+        with self.db:
+            self.db.executemany(insert, [
+                tuple(v.values()) + (v['historical'], v['kind'], v['signal'], v['target_start'],
+                                     v['target_end'], v['model_version'])
+                for v in rows])
+
+    def _values(self, run_id, *, kind, signal, target_start, target_end, horizon_minutes,
+                reference_price, model_version, predicted_price=None, predicted_direction=None,
+                predicted_high=None, predicted_low=None, confidence=None, threshold=0,
+                trained_at=None, training_cutoff=None, cached=False, historical=False,
+                metadata=None, generated_at=None):
         start, end = epoch(target_start), epoch(target_end)
         if end <= start or start % 300 or end % 300:
             raise ValueError("Prediction windows must be positive and aligned to five-minute candles")
@@ -87,23 +111,31 @@ class PredictionHistory:
             raise ValueError("Prediction prices must be positive and finite")
         # Capture actual generation time, including long fresh-training runs.
         generated = epoch(generated_at or datetime.now(timezone.utc))
-        values = dict(run_id=run_id, kind=kind, signal=signal, target_start=start,
-                      target_end=end, horizon_minutes=int(horizon_minutes),
-                      reference_price=float(reference_price), predicted_price=predicted_price,
-                      predicted_direction=predicted_direction, predicted_high=predicted_high,
-                      predicted_low=predicted_low, confidence=confidence, threshold=float(threshold),
-                      model_version=str(model_version), trained_at=epoch(trained_at) if trained_at is not None else None,
-                      training_cutoff=epoch(training_cutoff) if training_cutoff is not None else None,
-                      cached=int(cached), historical=int(historical or end <= generated),
-                      metadata=json.dumps(dict(metadata or {}, generated_at=iso(generated)), default=str))
-        with self.db:
-            self.db.execute(f"INSERT OR IGNORE INTO predictions ({','.join(values)}) "
-                            f"VALUES ({','.join('?' for _ in values)})", tuple(values.values()))
+        return dict(run_id=run_id, kind=kind, signal=signal, target_start=start,
+                    target_end=end, horizon_minutes=int(horizon_minutes),
+                    reference_price=float(reference_price), predicted_price=predicted_price,
+                    predicted_direction=predicted_direction, predicted_high=predicted_high,
+                    predicted_low=predicted_low, confidence=confidence, threshold=float(threshold),
+                    model_version=str(model_version), trained_at=epoch(trained_at) if trained_at is not None else None,
+                    training_cutoff=epoch(training_cutoff) if training_cutoff is not None else None,
+                    cached=int(cached), historical=int(historical or end <= generated),
+                    metadata=json.dumps(dict(metadata or {}, generated_at=iso(generated)), default=str))
 
     def pending_windows(self, now=None):
         return self.db.execute("SELECT DISTINCT target_start,target_end FROM predictions "
                                "WHERE status='pending' AND target_end<=? ORDER BY target_start",
                                (epoch(now or datetime.now(timezone.utc)),)).fetchall()
+
+    def expire(self, cutoff, now=None):
+        """Mark windows still pending after `cutoff` as unscorable.
+
+        Coinbase omits candles for intervals with no trades, so a window can be
+        permanently incomplete; without expiry it would be re-fetched every run.
+        """
+        with self.db:
+            return self.db.execute("UPDATE predictions SET status='unscorable', scored_at=? "
+                                   "WHERE status='pending' AND target_end<=?",
+                                   (epoch(now or datetime.now(timezone.utc)), epoch(cutoff))).rowcount
 
     def reconcile(self, candles, now=None):
         """Candles: timestamp/open-time, price/close, high, low; exact five-minute bars only."""
