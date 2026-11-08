@@ -159,6 +159,69 @@ class HistoryTests(unittest.TestCase):
             runtime.reconcile(Frame())
         self.assertEqual(self.h.rows()[0]['status'], 'scored')
 
+    def test_permanently_missing_candle_expires_after_grace(self):
+        self.add()
+        class Frame:
+            def to_dict(self, orient):
+                return []
+        runtime = HistoryRuntime.__new__(HistoryRuntime)
+        runtime.history = self.h
+        runtime.fetcher = lambda start, end: self.candles(start)[1:]  # one bar never published
+        runtime.now = self.base+12*3600
+        with contextlib.redirect_stdout(io.StringIO()):
+            runtime.reconcile(Frame())
+        self.assertEqual(self.h.rows()[0]['status'], 'pending')
+        runtime.now = self.base+31*3600
+        with contextlib.redirect_stdout(io.StringIO()):
+            runtime.reconcile(Frame())
+        self.assertEqual(self.h.rows()[0]['status'], 'unscorable')
+        self.assertEqual(self.h.pending_windows(runtime.now), [])
+
+    def test_failed_backfill_does_not_expire(self):
+        self.add()
+        class Frame:
+            def to_dict(self, orient):
+                return []
+        def offline(start, end):
+            raise OSError('offline')
+        runtime = HistoryRuntime.__new__(HistoryRuntime)
+        runtime.history = self.h
+        runtime.fetcher = offline
+        runtime.now = self.base+31*3600
+        with contextlib.redirect_stdout(io.StringIO()):
+            runtime.reconcile(Frame())
+        self.assertEqual(self.h.rows()[0]['status'], 'pending')
+
+    def test_actual_candle_fetch_sends_accepted_user_agent(self):
+        # Coinbase answers urllib's default "Python-urllib/x.y" agent with HTTP 403.
+        import services.history_runtime as runtime_module
+        captured = {}
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+        def fake_urlopen(request, timeout):
+            captured['agent'] = request.get_header('User-agent')
+            return Response(b'[[1790000000, 1, 3, 2, 2.5, 10]]')
+        with patch.object(runtime_module, 'urlopen', fake_urlopen):
+            rows = runtime_module.fetch_actual_candles(1790000000, 1790000300)
+        self.assertTrue(captured['agent'])
+        self.assertNotIn('Python-urllib', captured['agent'])
+        self.assertEqual(rows, [dict(date=1790000000, low=1.0, high=3.0, price=2.5)])
+
+    def test_batched_historical_rows_not_duplicated_across_runs(self):
+        heldout = [dict(kind='direction', signal='heldout', target_start=self.base+i*300,
+                        target_end=self.base+(i+1)*300, horizon_minutes=15, reference_price=82000,
+                        predicted_direction=1, model_version='cached', historical=True)
+                   for i in range(5)]
+        self.h.record_many(self.run, heldout)
+        second = self.h.start_run('test', self.base, 82000, self.base, run_id='second')
+        self.h.record_many(second, heldout)
+        self.assertEqual(len(self.h.rows()), 5)
+        self.h.record_many(second, [dict(row, model_version='retrained') for row in heldout])
+        self.assertEqual(len(self.h.rows()), 10)
+
     def test_runtime_database_failure_is_nonfatal(self):
         with patch.dict(os.environ, {'PREDICTION_DB_PATH': self.temp.name}):
             with contextlib.redirect_stdout(io.StringIO()) as out:

@@ -17,13 +17,16 @@ RUN python -m pip install --upgrade pip \
         "numpy>=1.26,<3" \
         "pandas>=2.2,<3" \
         "scikit-learn>=1.5,<1.10" \
+        "imbalanced-learn==0.14.2" \
         "scipy>=1.14,<2" \
         "requests>=2.31,<3" \
         "joblib>=1.3,<2" \
         "python-dateutil>=2.8,<3"
 
 COPY config ./config
-COPY priceprediction.py enhanced_forecasting.py enhanced_prediction.py .\
-     continuous_training.py ./
+COPY services ./services
+COPY python ./python
+COPY priceprediction.py enhanced_forecasting.py enhanced_prediction.py \
+     continuous_training.py class_balancing.py weighted_voting.py ./
 
 CMD ["python", "priceprediction.py"]

@@ -1,14 +1,87 @@
-node_modules
-.venv/
-__pycache__/
-# Persisted fitted-model state cache for enhanced_prediction.py.
-# See services/model_state.py for the save/load API and schema_version.
-services/_state/
+# ---------------------------------------------------------------------------
+# Secrets. Real keys (COINBASE_API_KEY_SECRET, API_TOKEN) live in .env and must
+# never be committed. .env.example documents every variable instead.
+# ---------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+.env.production
 
-# Runtime prediction history and SQLite journals must stay local.
+# ---------------------------------------------------------------------------
+# Node: API server (server/, mcp/) and React client (client/, Vite)
+# ---------------------------------------------------------------------------
+node_modules/
+client/dist/
+# Legacy Create React App output
+client/build/
+.vite/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+.eslintcache
+
+# ---------------------------------------------------------------------------
+# Runtime data and logs written by the server and the Python models
+# ---------------------------------------------------------------------------
+# utils/logger.js writes logs/general.log and logs/error.log
+logs/
+*.log
+# SQLite ledgers (data/predictions.sqlite3, data/trading.sqlite3) and redis volume
+data/
 *.sqlite3
 *.sqlite3-*
 *.sqlite
 *.sqlite-*
 *.db
 *.db-*
+# FIX engine session store / logs (server/brokers/fixBroker.js)
+fixlogs/
+
+# Persisted fitted-model state cache for enhanced_prediction.py.
+# See services/model_state.py for the save/load API and schema_version.
+services/_state/
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+# Built wheels (the tracked _cuml.wheel / _cuml_meta.whl predate this rule)
+*.whl
+# Timestamped manual backups, e.g. priceprediction.py.backup_pre_sync_20261021_145552
+*.backup_*
+
+# ---------------------------------------------------------------------------
+# Java / JVM and TypeScript build output (JDK tooling is configured in the
+# editor; ignore compiled artifacts if any JVM or tsc build is added later)
+# ---------------------------------------------------------------------------
+*.class
+*.jar
+*.war
+hs_err_pid*
+target/
+.gradle/
+/build/
+/out/
+/dist/
+
+# ---------------------------------------------------------------------------
+# Editors and OS. Shared .idea/ and .vscode/ config stays tracked; per-user
+# state does not.
+# ---------------------------------------------------------------------------
+.idea/workspace.xml
+.idea/shelf/
+.idea/usage.statistics.xml
+.idea/dataSources*
+.idea/httpRequests/
+.vscode/*.log
+.DS_Store
+Thumbs.db

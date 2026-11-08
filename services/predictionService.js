@@ -1,235 +1,79 @@
 /**
- * Prediction Service for Bitcoin Trading Platform
- * Interfaces with Python prediction model
+ * Runs the Python model (python/run_prediction.py) with live Coinbase prices.
  */
 
-const { PythonShell } = require('python-shell');
 const path = require('path');
-const NodeCache = require('node-cache');
-const fixService = require('./fixService');
+const { PythonShell } = require('python-shell');
+const { ApiError } = require('../server/http');
 const { logMessage, logError } = require('../utils/logger');
-const { isDemoMode } = require('../utils/runtimeMode');
 
-// Cache for storing latest predictions
-const predictionCache = new NodeCache({ stdTTL: 300 }); // 5 minutes TTL
+const SCRIPT_DIR = path.join(__dirname, '..', 'python');
 
-/**
- * Run Bitcoin prediction model
- */
-const runPredictionModel = async () => {
-  try {
-    logMessage('Running Bitcoin prediction model...');
+const defaultRunner = (args, pythonPath) => PythonShell.run('run_prediction.py', {
+  mode: 'json',
+  scriptPath: SCRIPT_DIR,
+  pythonPath,
+  args,
+});
 
-    // Get latest market data
-    const marketData = await fixService.getMarketData('BTC/USD');
+const createPredictionService = ({ market, config, events, runPython = defaultRunner }) => {
+  let latest = null;
+  let lastError = null;
+  let inFlight = null;
+  let timer = null;
 
-    // Options for Python shell
-    const options = {
-      mode: 'json',
-      scriptPath: path.join(__dirname, '../python'),
-      args: [
-        '--price', marketData.last.toString(),
-        '--volume', marketData.volume.toString(),
-        '--time', new Date().toISOString()
-      ]
-    };
-    if (isDemoMode) {
-      options.args.push('--allow-synthetic');
-    }
+  const execute = async () => {
+    const ticker = await market.getTicker(config.product);
+    // run_prediction.py replaces the newest bar's volume with --volume, so pass the
+    // latest 5-minute candle's volume rather than a 24h figure.
+    const candles = await market.getCandles(config.product, { granularity: 'FIVE_MINUTE', limit: 2 });
+    const volume = candles.at(-1)?.volume ?? 0;
+    const args = ['--price', String(ticker.price), '--volume', String(volume), '--time', new Date().toISOString()];
+    if (market.offline) args.push('--allow-synthetic');
 
-    // Run Python prediction script
-    return new Promise((resolve, reject) => {
-      PythonShell.run('run_prediction.py', options, (err, results) => {
-        if (err) {
-          logError('Error running prediction model:', err);
-          return reject(err);
-        }
-
-        if (!results || !results.length) {
-          return reject(new Error('No prediction results returned'));
-        }
-
-        const prediction = results[0];
-
-        if (prediction && prediction.error) {
-          return reject(new Error(`Python model error: ${prediction.error}`));
-        }
-
-        if (!isDemoMode && prediction && prediction.simulated) {
-          return reject(new Error('Prediction payload flagged as simulated while DEMO_MODE is disabled'));
-        }
-
-        logMessage(`Prediction model result: ${JSON.stringify(prediction)}`);
-
-        // Cache prediction result
-        predictionCache.set('latest', {
-          ...prediction,
-          timestamp: new Date(),
-          price: marketData.last
-        });
-
-        resolve(prediction);
-      });
-    });
-  } catch (error) {
-    logError('Error in prediction model execution:', error);
-    if (isDemoMode) {
-      return simulatePrediction();
-    }
-    throw error;
-  }
-};
-
-/**
- * Get latest prediction
- */
-const getLatestPrediction = async () => {
-  const cachedPrediction = predictionCache.get('latest');
-
-  if (cachedPrediction) {
-    return cachedPrediction;
-  }
-
-  if (isDemoMode) {
-    // If no cached prediction, generate a demo prediction.
-    return simulatePrediction();
-  }
-
-  // In non-demo mode, attempt a real model run instead of synthetic fallback.
-  return runPredictionModel();
-};
-
-/**
- * Simulate prediction for demo purposes
- */
-const simulatePrediction = async () => {
-  try {
-    const marketData = await fixService.getMarketData('BTC/USD');
-
-    // Calculate random prediction probabilities
-    const increaseProbability = Math.random() * 0.5 + 0.25; // 25-75%
-    const decreaseProbability = Math.random() * 0.5 + 0.25; // 25-75%
-    const noChangeProbability = 1 - increaseProbability - decreaseProbability;
-
-    // Determine predicted direction based on highest probability
-    let predictedDirection;
-    if (increaseProbability > decreaseProbability && increaseProbability > noChangeProbability) {
-      predictedDirection = 1; // Increase
-    } else if (decreaseProbability > increaseProbability && decreaseProbability > noChangeProbability) {
-      predictedDirection = -1; // Decrease
-    } else {
-      predictedDirection = 0; // No change
-    }
-
-    // Create prediction object
-    const prediction = {
-      price: marketData.last,
-      timestamp: new Date(),
-      predicted_direction: predictedDirection,
-      increase_probability: increaseProbability,
-      decrease_probability: decreaseProbability,
-      no_change_probability: noChangeProbability,
-      confidence: Math.max(increaseProbability, decreaseProbability, noChangeProbability),
-      timeframe: '1 minute',
-      threshold: 0.0005, // 0.05%
-      simulated: true // Flag to indicate this is simulated
-    };
-
-    // Cache the prediction
-    predictionCache.set('latest', prediction);
-
-    return prediction;
-  } catch (error) {
-    logError('Error simulating prediction:', error);
-    throw error;
-  }
-};
-
-/**
- * Schedule regular predictions
- */
-const schedulePredictions = (io) => {
-  // Run prediction every minute
-  const predictionInterval = 60000; // 1 minute
-
-  setInterval(async () => {
+    let results;
     try {
-      const prediction = await runPredictionModel();
-
-      // Broadcast to all connected clients
-      if (io) {
-        io.emit('predictionData', prediction);
-      }
+      results = await runPython(args, config.pythonPath);
     } catch (error) {
-      logError('Error in scheduled prediction:', error);
+      throw new ApiError(502, 'model_error', `Prediction script failed: ${error.message}`);
     }
-  }, predictionInterval);
+    const prediction = (results || []).find((row) => row && typeof row === 'object');
+    if (!prediction) throw new ApiError(502, 'model_error', 'Prediction script returned no result');
+    if (prediction.error) throw new ApiError(502, 'model_error', `Python model error: ${prediction.error}`);
 
-  logMessage(`Scheduled predictions every ${predictionInterval/1000} seconds`);
+    latest = { ...prediction, productId: config.product, generatedAt: new Date().toISOString() };
+    lastError = null;
+    logMessage(`Prediction: direction=${latest.predicted_direction} confidence=${latest.confidence}`);
+    events?.emit('prediction', latest);
+    return latest;
+  };
+
+  /** Run the model; concurrent callers share one in-flight run. */
+  const run = () => {
+    if (!inFlight) {
+      inFlight = execute()
+        .catch((error) => {
+          lastError = { message: error.message, at: new Date().toISOString() };
+          throw error;
+        })
+        .finally(() => { inFlight = null; });
+    }
+    return inFlight;
+  };
+
+  const schedule = (intervalMs) => {
+    const tick = () => run().catch((error) => logError('Scheduled prediction failed:', error));
+    tick();
+    timer = setInterval(tick, intervalMs);
+    return () => clearInterval(timer);
+  };
+
+  return {
+    run,
+    schedule,
+    getLatest: () => latest,
+    status: () => ({ running: Boolean(inFlight), lastRunAt: latest?.generatedAt ?? null, lastError }),
+  };
 };
 
-/**
- * Get historical predictions
- */
-const getHistoricalPredictions = async (timeframe = '1h') => {
-  try {
-    if (!isDemoMode) {
-      throw new Error('Historical predictions are demo-only until a real persistence source is implemented');
-    }
-
-    // In a real implementation, this would query a database
-    // For demo purposes, we'll generate simulated historical data
-
-    const numDataPoints = timeframe === '1h' ? 60 : 
-                          timeframe === '1d' ? 24 * 60 : 
-                          timeframe === '1w' ? 7 * 24 * 60 : 60;
-
-    const currentPrice = (await fixService.getMarketData('BTC/USD')).last;
-    const predictions = [];
-
-    // Generate simulated historical predictions
-    for (let i = 0; i < numDataPoints; i++) {
-      const timestamp = new Date(Date.now() - (i * 60 * 1000)); // Go back i minutes
-      const priceDelta = (Math.random() - 0.5) * 100; // Random price change
-      const price = currentPrice - priceDelta * i / 10;
-
-      const increaseProbability = Math.random() * 0.5 + 0.25;
-      const decreaseProbability = Math.random() * 0.5 + 0.25;
-      const noChangeProbability = 1 - increaseProbability - decreaseProbability;
-
-      let predictedDirection;
-      if (increaseProbability > decreaseProbability && increaseProbability > noChangeProbability) {
-        predictedDirection = 1;
-      } else if (decreaseProbability > increaseProbability && decreaseProbability > noChangeProbability) {
-        predictedDirection = -1;
-      } else {
-        predictedDirection = 0;
-      }
-
-      predictions.push({
-        price,
-        timestamp,
-        predicted_direction: predictedDirection,
-        increase_probability: increaseProbability,
-        decrease_probability: decreaseProbability,
-        no_change_probability: noChangeProbability,
-        confidence: Math.max(increaseProbability, decreaseProbability, noChangeProbability),
-        timeframe: '1 minute',
-        threshold: 0.0005,
-        simulated: true
-      });
-    }
-
-    return predictions.reverse(); // Most recent first
-  } catch (error) {
-    logError('Error getting historical predictions:', error);
-    throw error;
-  }
-};
-
-module.exports = {
-  runPredictionModel,
-  getLatestPrediction,
-  schedulePredictions,
-  getHistoricalPredictions
-};
+module.exports = { createPredictionService };

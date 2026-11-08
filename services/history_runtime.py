@@ -5,9 +5,15 @@ import hashlib
 import json
 import time
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from services.prediction_history import PredictionHistory, epoch, iso
+
+# Windows still missing candles this long after they close are marked unscorable.
+PENDING_GRACE_SECONDS = 24 * 3600
+
+# Coinbase rejects urllib's default "Python-urllib/x.y" User-Agent with HTTP 403.
+USER_AGENT = 'priceprediction-history/1.0'
 
 
 def best_effort(method):
@@ -26,8 +32,9 @@ def best_effort(method):
 def fetch_actual_candles(start, end):
     """Fetch exact historical five-minute Coinbase candles; caller handles gaps."""
     query = urlencode(dict(granularity=300, start=iso(start), end=iso(end)))
-    with urlopen('https://api.exchange.coinbase.com/products/BTC-USD/candles?' + query,
-                 timeout=15) as response:
+    request = Request('https://api.exchange.coinbase.com/products/BTC-USD/candles?' + query,
+                      headers={'User-Agent': USER_AGENT, 'Accept': 'application/json'})
+    with urlopen(request, timeout=15) as response:
         rows = json.load(response)
     return [dict(date=int(r[0]), low=float(r[1]), high=float(r[2]), price=float(r[4])) for r in rows]
 
@@ -69,16 +76,21 @@ class HistoryRuntime:
                 ranges[-1][1] = t + 300
             else:
                 ranges.append([t, t + 300])
+        fetch_failed = False
         for index, (start, end) in enumerate(ranges):
             try:
                 if index and self.fetcher is fetch_actual_candles:
                     time.sleep(0.35)
                 records.extend(self.fetcher(start, end))
             except Exception as exc:
+                fetch_failed = True
                 print(f"Prediction history actual-data fetch failed ({iso(start)}): {exc}")
         if ranges:
             scored += self.history.reconcile(records, self.now)
-        print(f"Prediction history: {scored} newly scored")
+        # Only give up on old windows once their candles were actually requested.
+        expired = 0 if fetch_failed else self.history.expire(self.now - PENDING_GRACE_SECONDS, self.now)
+        print(f"Prediction history: {scored} newly scored"
+              + (f", {expired} expired as unscorable" if expired else ""))
         self.history.report()
 
     @best_effort
@@ -88,6 +100,16 @@ class HistoryRuntime:
         self.history.record(self.run_id, kind=kind, signal=signal, target_start=target_start,
                             target_end=target_end, horizon_minutes=horizon_minutes,
                             reference_price=float(reference_price), **model, **values)
+
+    @best_effort
+    def predictions(self, items):
+        """Batch form of prediction(): every item is written in one transaction."""
+        rows = []
+        for item in items:
+            item = dict(item)
+            model = item.pop('model', None) or dict(model_version='rules-v1', cached=False)
+            rows.append(dict(item, reference_price=float(item['reference_price']), **model))
+        self.history.record_many(self.run_id, rows)
 
     def classifier(self, model, features, row, horizon_minutes, threshold, identity,
                    signal='classifier'):
