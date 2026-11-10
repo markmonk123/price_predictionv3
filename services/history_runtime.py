@@ -40,19 +40,31 @@ def fetch_actual_candles(start, end):
 
 
 class HistoryRuntime:
-    def __init__(self, source, raw_df, now=None, fetcher=fetch_actual_candles):
+    def __init__(self, source, raw_df, now=None, fetcher=fetch_actual_candles,
+                 reference_price=None, data_cutoff=None):
+        """raw_df: completed-or-forming candles (date=open time, price=close, high, low).
+
+        By default the run's reference is the last row's close at its candle close.
+        Live runners that predict from a ticker price mid-candle pass
+        reference_price/data_cutoff explicitly instead.
+        """
         self.history = None
         self.run_id = None
         self.now = epoch(now or datetime.now(timezone.utc))
         self.source = source
         self.raw_df = raw_df
         self.fetcher = fetcher
+        self.last_scored = 0
+        self.last_expired = 0
         try:
             self.history = PredictionHistory()
             self.reconcile(raw_df)
             latest = raw_df.iloc[-1]
-            self.run_id = self.history.start_run(source, epoch(latest['date']) + 300,
-                                                 float(latest['price']), self.now)
+            self.run_id = self.history.start_run(
+                source,
+                epoch(data_cutoff) if data_cutoff is not None else epoch(latest['date']) + 300,
+                float(reference_price if reference_price is not None else latest['price']),
+                self.now)
         except Exception as exc:
             print(f"Prediction history initialization failed: {exc}")
             if self.history is not None:
@@ -89,6 +101,7 @@ class HistoryRuntime:
             scored += self.history.reconcile(records, self.now)
         # Only give up on old windows once their candles were actually requested.
         expired = 0 if fetch_failed else self.history.expire(self.now - PENDING_GRACE_SECONDS, self.now)
+        self.last_scored, self.last_expired = scored, expired
         print(f"Prediction history: {scored} newly scored"
               + (f", {expired} expired as unscorable" if expired else ""))
         self.history.report()
@@ -149,7 +162,9 @@ class HistoryRuntime:
 
     @best_effort
     def finish(self):
-        self.history.reconcile(self.raw_df.to_dict('records'))
+        # Use the run's clock, not the wall clock: raw_df was fetched at self.now,
+        # so a bar still forming then holds partial values even if it has closed since.
+        self.history.reconcile(self.raw_df.to_dict('records'), self.now)
         self.history.report()
         self.history.close()
         self.history = None

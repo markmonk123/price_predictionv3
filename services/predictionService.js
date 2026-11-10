@@ -43,7 +43,12 @@ const createPredictionService = ({ market, config, events, runPython = defaultRu
 
     latest = { ...prediction, productId: config.product, generatedAt: new Date().toISOString() };
     lastError = null;
-    logMessage(`Prediction: direction=${latest.predicted_direction} confidence=${latest.confidence}`);
+    const { history } = latest;
+    const ledgerNote = history?.recorded
+      ? `recorded (target ${history.target_end}, ${history.newly_scored ?? 0} newly scored)`
+      : `NOT recorded: ${history?.reason ?? 'model returned no ledger status'}`;
+    logMessage(`Prediction: direction=${latest.predicted_direction} confidence=${latest.confidence}; ledger ${ledgerNote}`);
+    if (history && !history.recorded && !latest.simulated) logError(`Prediction ledger write failed: ${history.reason}`);
     events?.emit('prediction', latest);
     return latest;
   };

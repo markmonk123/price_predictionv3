@@ -6,6 +6,7 @@ Runs the enhanced prediction model from Python and returns results as JSON
 """
 
 import argparse
+import contextlib
 import json
 import sys
 import os
@@ -129,9 +130,18 @@ def fetch_recent_market_data(current_price, volume, timestamp, window_size=NUM_D
     if len(candles) < max(10, window_size // 3):
         raise ValueError(f"Insufficient candle history returned ({len(candles)} rows)")
 
-    df = pd.DataFrame({
+    # Untouched candles (with high/low) for scoring earlier predictions: the
+    # ledger must never see the live ticker price spliced into a bar's close.
+    candles_df = pd.DataFrame({
         "date": [utc_from_epoch(c[0]) for c in candles],
+        "low": [float(c[1]) for c in candles],
+        "high": [float(c[2]) for c in candles],
         "price": [float(c[4]) for c in candles],   # close
+    })
+
+    df = pd.DataFrame({
+        "date": candles_df["date"],
+        "price": candles_df["price"].copy(),
         "volume": [float(c[5]) for c in candles]
     })
 
@@ -139,7 +149,7 @@ def fetch_recent_market_data(current_price, volume, timestamp, window_size=NUM_D
     df.loc[df.index[-1], "price"] = float(current_price)
     df.loc[df.index[-1], "volume"] = float(volume)
 
-    return df
+    return df, candles_df
 
 def generate_synthetic_data(current_price, volume, timestamp, window_size=NUM_DATA_POINTS):
     """
@@ -175,14 +185,64 @@ def generate_synthetic_data(current_price, volume, timestamp, window_size=NUM_DA
 
     return df
 
+MODEL_VERSION = "run_prediction-rf-v1"
+SIGNAL = "live_rf"
+
+
+def history_disabled():
+    return os.environ.get("PREDICTION_HISTORY", "").strip().lower() in ("0", "false", "no", "off")
+
+
+def record_prediction(*, candles_df, generated_at, reference_price, direction, confidence,
+                      training_cutoff, runtime_factory=None):
+    """Write this run's direction call to the durable ledger and score older ones.
+
+    Best effort: a ledger failure never fails the prediction, it is reported in
+    the returned dict instead. The prediction is made from a live ticker price
+    at `generated_at`, usually mid-candle, so the target is the candle close
+    HORIZON_MINUTES after the current candle closes (aligned to 5-minute bars,
+    which the ledger requires for exact scoring).
+    """
+    if history_disabled():
+        return {"recorded": False, "reason": "PREDICTION_HISTORY disabled"}
+    from services.history_runtime import HistoryRuntime, model_identity
+    from services.prediction_history import epoch, iso
+
+    now = epoch(generated_at)
+    bar_seconds = BAR_MINUTES * 60
+    current_bar_close = -(-now // bar_seconds) * bar_seconds
+    target_end = current_bar_close + int(HORIZON_MINUTES) * 60
+
+    factory = runtime_factory or HistoryRuntime
+    runtime = factory("python/run_prediction.py", candles_df, now=now,
+                      reference_price=reference_price, data_cutoff=now)
+    if runtime.history is None:
+        return {"recorded": False, "reason": "prediction ledger unavailable (see stderr)"}
+    try:
+        identity = model_identity("run_prediction:rf", now, training_cutoff, version=MODEL_VERSION)
+        runtime.history.record(
+            runtime.run_id, kind="direction", signal=SIGNAL,
+            target_start=target_end - bar_seconds, target_end=target_end,
+            horizon_minutes=int(HORIZON_MINUTES), reference_price=float(reference_price),
+            predicted_direction=int(direction), confidence=float(confidence),
+            threshold=float(PCT_THRESHOLD), generated_at=now, **identity)
+        return {"recorded": True, "run_id": runtime.run_id, "target_end": iso(target_end),
+                "newly_scored": runtime.last_scored, "expired": runtime.last_expired}
+    except Exception as exc:
+        return {"recorded": False, "reason": f"{type(exc).__name__}: {exc}"}
+    finally:
+        runtime.finish()
+
+
 def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, allow_synthetic=False):
     """
     Run the Bitcoin prediction model and return results
     """
     try:
         data_source = "live"
+        candles_df = None
         try:
-            df = fetch_recent_market_data(price, volume, timestamp, window_size)
+            df, candles_df = fetch_recent_market_data(price, volume, timestamp, window_size)
         except Exception:
             if not allow_synthetic:
                 raise
@@ -251,6 +311,22 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
             "data_source": data_source
         }
 
+        if data_source == "live":
+            try:
+                result["history"] = record_prediction(
+                    candles_df=candles_df,
+                    generated_at=to_naive_utc(timestamp),
+                    reference_price=price,
+                    direction=prediction,
+                    confidence=result["confidence"],
+                    training_cutoff=labeled_df['date'].iloc[-1],
+                )
+            except Exception as exc:
+                result["history"] = {"recorded": False, "reason": f"{type(exc).__name__}: {exc}"}
+        else:
+            # Synthetic prices scored against real Coinbase candles would be noise.
+            result["history"] = {"recorded": False, "reason": "synthetic data is not recorded"}
+
         return result
 
     except Exception as e:
@@ -260,13 +336,16 @@ if __name__ == "__main__":
     args = parse_arguments()
     timestamp = to_naive_utc(args.time)
 
-    result = run_prediction(
-        price=args.price,
-        volume=args.volume,
-        timestamp=timestamp,
-        window_size=args.window,
-        allow_synthetic=args.allow_synthetic
-    )
+    # Node reads stdout in JSON mode: one non-JSON line (ledger progress, model
+    # chatter) fails the whole run, so everything except the result goes to stderr.
+    with contextlib.redirect_stdout(sys.stderr):
+        result = run_prediction(
+            price=args.price,
+            volume=args.volume,
+            timestamp=timestamp,
+            window_size=args.window,
+            allow_synthetic=args.allow_synthetic
+        )
 
     # Output as JSON
     print(json.dumps(result))
