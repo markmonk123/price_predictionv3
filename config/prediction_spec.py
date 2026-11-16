@@ -14,9 +14,9 @@ from __future__ import annotations
 #          evaluate_threshold_horizon_grid), priceprediction.py (only where
 #          explicitly opting in via SHARED).
 # ---------------------------------------------------------------------------
-HORIZON_MINUTES: int = 15
+HORIZON_MINUTES: int = 60
 PCT_THRESHOLD: float = 0.0015          # 0.15 percent
-TIMEFRAME_LABEL: str = f"{HORIZON_MINUTES} minutes"
+TIMEFRAME_LABEL: str = "1 hour"
 
 # ---------------------------------------------------------------------------
 # Regression (continuous multi-step forecaster) product spec
@@ -36,7 +36,7 @@ NUM_DATA_POINTS: int = 11000           # 11000 x 5m bars ~= 38 days of history
 # Walk-forward CV search grid (centered on the spec above)
 # Used by: enhanced_prediction.evaluate_threshold_horizon_grid.
 # ---------------------------------------------------------------------------
-HORIZON_GRID_MINUTES: tuple = (3, 6, 12, 24)     # 15m/30m/1h/2h in 5m bars
+HORIZON_GRID_MINUTES: tuple = (6, 12, 24, 48)     # 30m/1h/2h/4h in 5m bars
 THRESHOLD_GRID: tuple = (0.010, 0.015, 0.020)
 
 
