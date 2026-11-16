@@ -42,12 +42,12 @@ try:
         spec_summary,
     )
 except Exception:  # pragma: no cover
-    HORIZON_MINUTES = 15
+    HORIZON_MINUTES = 60
     PCT_THRESHOLD = 0.0015   # match config.prediction_spec.py (per SOP D5/F4)
     BAR_MINUTES = 5
     NUM_DATA_POINTS = 11000
-    TIMEFRAME_LABEL = '15 minutes'
-    HORIZON_GRID_MINUTES = (3, 6, 12, 24)
+    TIMEFRAME_LABEL = '1 hour'
+    HORIZON_GRID_MINUTES = (6, 12, 24, 48)
     THRESHOLD_GRID = (0.010, 0.015, 0.020)
     HORIZON_HOURS = 12
     spec_summary = lambda: f'horizon={HORIZON_MINUTES}m, threshold=±{PCT_THRESHOLD*100:.1f}%'

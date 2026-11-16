@@ -7,6 +7,16 @@
         "API_BASE_URL": "${API_BASE_URL:-http://127.0.0.1:5000/api/v1}",
         "API_TOKEN": "${API_TOKEN:-}"
       }
+    },
+    "coinbase-cdp": {
+      "command": "node",
+      "args": ["mcp/cdp-server.js"],
+      "env": {
+        "CDP_API_KEY_NAME": "${CDP_API_KEY_NAME:-}",
+        "CDP_API_KEY_PRIVATE_KEY": "${CDP_API_KEY_PRIVATE_KEY:-}",
+        "CDP_NETWORK": "${CDP_NETWORK:-base-sepolia}",
+        "CDP_DEBUG": "${CDP_DEBUG:-false}"
+      }
     }
   }
 }

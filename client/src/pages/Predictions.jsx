@@ -3,6 +3,8 @@ import {
   Box, MenuItem, Table, TableBody, TableCell, TableHead, TablePagination, TableRow, TextField,
   ToggleButton, ToggleButtonGroup, Typography,
 } from '@mui/material';
+import CheckIcon from '@mui/icons-material/Check';
+import CloseIcon from '@mui/icons-material/Close';
 import { useTheme } from '@mui/material/styles';
 import { useAccuracy, usePredictionHistory } from '../api/hooks';
 import { Panel } from '../components/Panel';
@@ -108,6 +110,9 @@ const HistoryTable = ({ filters }) => {
                     <TableCell>Prediction</TableCell>
                     <TableCell>Target window</TableCell>
                     <TableCell>Status</TableCell>
+                    <TableCell align="right">Actual</TableCell>
+                    <TableCell align="right">% Diff</TableCell>
+                    <TableCell>Signal Accurate</TableCell>
                     <TableCell>Outcome</TableCell>
                   </TableRow>
                 </TableHead>
@@ -122,6 +127,29 @@ const HistoryTable = ({ filters }) => {
                       <TableCell>{describePrediction(row)}</TableCell>
                       <TableCell>{formatTime(row.target_start)} → {formatTime(row.target_end)}</TableCell>
                       <TableCell><PredictionStatus status={row.status} /></TableCell>
+                      <TableCell align="right" className="num">
+                        {row.status === 'scored' && row.actual_price != null ? formatUsd(row.actual_price) : '–'}
+                      </TableCell>
+                      <TableCell align="right" className="num">
+                        {row.status === 'scored' && row.abs_pct_error != null ? formatPct(row.abs_pct_error, 2) : '–'}
+                      </TableCell>
+                      <TableCell>
+                        {row.status === 'scored' && row.direction_correct != null ? (
+                          <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                            {row.direction_correct === 1 ? (
+                              <>
+                                <CheckIcon fontSize="small" color="success" />
+                                <Box component="span" sx={{ color: 'success.main', fontSize: '0.875rem' }}>Yes</Box>
+                              </>
+                            ) : (
+                              <>
+                                <CloseIcon fontSize="small" color="error" />
+                                <Box component="span" sx={{ color: 'error.main', fontSize: '0.875rem' }}>No</Box>
+                              </>
+                            )}
+                          </Box>
+                        ) : '–'}
+                      </TableCell>
                       <TableCell><Outcome row={row} /></TableCell>
                     </TableRow>
                   ))}
