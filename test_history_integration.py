@@ -59,11 +59,13 @@ class IntegrationTests(unittest.TestCase):
                 return np.ones(len(X), dtype=int)
 
         history = Mock()
+        timestamp = raw.date.iloc[-1] + pd.Timedelta(minutes=1)
+        original_price = raw.iloc[-1]['price']
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(prediction_runner, 'fetch_recent_market_data',
                                              return_value=raw))
-            stack.enter_context(patch.object(prediction_runner, 'create_enhanced_features',
-                                             return_value=features))
+            feature_builder = stack.enter_context(patch.object(
+                prediction_runner, 'create_enhanced_features', return_value=features))
             stack.enter_context(patch.object(prediction_runner, 'RandomForestClassifier',
                                              return_value=Model()))
             runtime = stack.enter_context(patch('services.history_runtime.HistoryRuntime',
@@ -71,10 +73,17 @@ class IntegrationTests(unittest.TestCase):
             output = io.StringIO()
             stack.enter_context(contextlib.redirect_stdout(output))
             for _ in range(2):
-                result = prediction_runner.run_prediction(82000, 10, window_size=len(raw))
+                result = prediction_runner.run_prediction(
+                    82000, 10, timestamp=timestamp, window_size=len(raw))
                 self.assertEqual(result['predicted_direction'], 1)
 
         self.assertEqual(runtime.call_count, 2)
+        history_actuals = runtime.call_args.args[1]
+        pd.testing.assert_frame_equal(history_actuals, raw.iloc[:-1])
+        inference_data = feature_builder.call_args.args[0]
+        self.assertEqual(inference_data.iloc[-1]['price'], 82000)
+        self.assertEqual(inference_data.iloc[-1]['volume'], 10)
+        self.assertEqual(raw.iloc[-1]['price'], original_price)
         self.assertEqual(history.prediction.call_count, 2)
         self.assertEqual(history.finish.call_count, 2)
         recorded = history.prediction.call_args.kwargs

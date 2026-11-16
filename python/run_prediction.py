@@ -138,10 +138,6 @@ def fetch_recent_market_data(current_price, volume, timestamp, window_size=NUM_D
         "volume": [float(c[5]) for c in candles]
     })
 
-    # Use latest values from the upstream market-data source for consistency.
-    df.loc[df.index[-1], "price"] = float(current_price)
-    df.loc[df.index[-1], "volume"] = float(volume)
-
     return df
 
 def generate_synthetic_data(current_price, volume, timestamp, window_size=NUM_DATA_POINTS):
@@ -184,6 +180,7 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
     """
     history = None
     try:
+        timestamp = to_naive_utc(timestamp)
         data_source = "live"
         try:
             df = fetch_recent_market_data(price, volume, timestamp, window_size)
@@ -196,18 +193,25 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
 
         if data_source == "live":
             from services.history_runtime import HistoryRuntime, epoch
+            candle_ends = pd.to_datetime(df['date'], utc=True) + pd.Timedelta(minutes=BAR_MINUTES)
+            history_df = df.loc[candle_ends <= pd.Timestamp(timestamp, tz='UTC')].copy()
             with contextlib.redirect_stdout(sys.stderr):
-                history = HistoryRuntime(__file__, df)
+                history = HistoryRuntime(__file__, history_df)
+
+        inference_df = df.copy()
+        if data_source == "live":
+            inference_df.loc[inference_df.index[-1], "price"] = float(price)
+            inference_df.loc[inference_df.index[-1], "volume"] = float(volume)
 
         # Create enhanced features. Keep the trailing rows whose future price is
         # not known yet: the last one carries the live price we predict from.
         enhanced_df = create_enhanced_features(
-            df,
+            inference_df,
             pct_threshold=PCT_THRESHOLD,
             horizon_steps=horizon_to_steps(HORIZON_MINUTES),
             include_unlabeled=True,
         )
-        if enhanced_df.empty or enhanced_df['date'].iloc[-1] != df['date'].iloc[-1]:
+        if enhanced_df.empty or enhanced_df['date'].iloc[-1] != inference_df['date'].iloc[-1]:
             raise ValueError("Latest candle does not have valid inference features")
         labeled_df = enhanced_df.dropna(subset=['future_price', 'next_return', 'target'])
 
@@ -261,7 +265,7 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
         }
 
         if history is not None:
-            target_end = epoch(df['date'].iloc[-1]) \
+            target_end = epoch(inference_df['date'].iloc[-1]) \
                 + (BAR_MINUTES + HORIZON_MINUTES) * 60
             with contextlib.redirect_stdout(sys.stderr):
                 history.prediction(
