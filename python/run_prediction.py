@@ -6,6 +6,7 @@ Runs the enhanced prediction model from Python and returns results as JSON
 """
 
 import argparse
+import contextlib
 import json
 import sys
 import os
@@ -132,6 +133,8 @@ def fetch_recent_market_data(current_price, volume, timestamp, window_size=NUM_D
     df = pd.DataFrame({
         "date": [utc_from_epoch(c[0]) for c in candles],
         "price": [float(c[4]) for c in candles],   # close
+        "high": [float(c[2]) for c in candles],
+        "low": [float(c[1]) for c in candles],
         "volume": [float(c[5]) for c in candles]
     })
 
@@ -179,6 +182,7 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
     """
     Run the Bitcoin prediction model and return results
     """
+    history = None
     try:
         data_source = "live"
         try:
@@ -189,6 +193,11 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
             # Explicit demo fallback
             df = generate_synthetic_data(price, volume, timestamp, window_size)
             data_source = "synthetic"
+
+        if data_source == "live":
+            from services.history_runtime import HistoryRuntime, epoch
+            with contextlib.redirect_stdout(sys.stderr):
+                history = HistoryRuntime(__file__, df)
 
         # Create enhanced features. Keep the trailing rows whose future price is
         # not known yet: the last one carries the live price we predict from.
@@ -204,7 +213,7 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
 
         # Select features (excluding target variables and non-predictive columns)
         feature_cols = [col for col in enhanced_df.columns
-                       if col not in ['date', 'price', 'future_price', 'next_return', 'target']]
+                       if col not in ['date', 'price', 'high', 'low', 'future_price', 'next_return', 'target']]
         X = enhanced_df[feature_cols].iloc[-1:]
 
         # Create a simple random forest classifier
@@ -251,10 +260,34 @@ def run_prediction(price, volume, timestamp=None, window_size=NUM_DATA_POINTS, a
             "data_source": data_source
         }
 
+        if history is not None:
+            target_end = epoch(df['date'].iloc[-1]) \
+                + (BAR_MINUTES + HORIZON_MINUTES) * 60
+            with contextlib.redirect_stdout(sys.stderr):
+                history.prediction(
+                    kind='direction',
+                    signal='run_prediction_classifier',
+                    target_start=target_end - BAR_MINUTES * 60,
+                    target_end=target_end,
+                    horizon_minutes=HORIZON_MINUTES,
+                    reference_price=price,
+                    predicted_direction=int(prediction),
+                    confidence=float(result['confidence']),
+                    threshold=float(PCT_THRESHOLD),
+                    model=dict(model_version='run-prediction-random-forest-v1',
+                               trained_at=datetime.datetime.now(datetime.timezone.utc),
+                               cached=False),
+                    metadata={'data_source': data_source},
+                )
+
         return result
 
     except Exception as e:
         return {"error": str(e), "errorType": type(e).__name__}
+    finally:
+        if history is not None:
+            with contextlib.redirect_stdout(sys.stderr):
+                history.finish()
 
 if __name__ == "__main__":
     args = parse_arguments()

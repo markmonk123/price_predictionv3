@@ -14,6 +14,7 @@ import pandas as pd
 from sklearn.ensemble import ExtraTreesRegressor
 
 import enhanced_forecasting as forecasting
+import python.run_prediction as prediction_runner
 from services.history_runtime import model_identity
 from services.prediction_history import PredictionHistory, epoch
 
@@ -39,6 +40,50 @@ class IntegrationTests(unittest.TestCase):
         dates = pd.date_range(end=end, periods=count, freq='5min')
         prices = 82000 + np.sin(np.arange(count)/9)*100 + np.arange(count)/10
         return pd.DataFrame(dict(date=dates, price=prices, high=prices+20, low=prices-20))
+
+    def test_scheduled_runner_records_live_predictions_and_finishes_each_ledger_run(self):
+        raw = self.frame().assign(volume=10)
+        features = raw.assign(feature_a=np.arange(len(raw)), future_price=raw.price+1,
+                              next_return=.001, target=1)
+
+        class Model:
+            classes_ = np.array([-1, 1])
+
+            def fit(self, X, y):
+                return self
+
+            def predict_proba(self, X):
+                return np.tile([.1, .9], (len(X), 1))
+
+            def predict(self, X):
+                return np.ones(len(X), dtype=int)
+
+        history = Mock()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(prediction_runner, 'fetch_recent_market_data',
+                                             return_value=raw))
+            stack.enter_context(patch.object(prediction_runner, 'create_enhanced_features',
+                                             return_value=features))
+            stack.enter_context(patch.object(prediction_runner, 'RandomForestClassifier',
+                                             return_value=Model()))
+            runtime = stack.enter_context(patch('services.history_runtime.HistoryRuntime',
+                                                return_value=history))
+            output = io.StringIO()
+            stack.enter_context(contextlib.redirect_stdout(output))
+            for _ in range(2):
+                result = prediction_runner.run_prediction(82000, 10, window_size=len(raw))
+                self.assertEqual(result['predicted_direction'], 1)
+
+        self.assertEqual(runtime.call_count, 2)
+        self.assertEqual(history.prediction.call_count, 2)
+        self.assertEqual(history.finish.call_count, 2)
+        recorded = history.prediction.call_args.kwargs
+        self.assertEqual(recorded['kind'], 'direction')
+        self.assertEqual(recorded['signal'], 'run_prediction_classifier')
+        self.assertEqual(recorded['horizon_minutes'], 15)
+        self.assertEqual(recorded['predicted_direction'], 1)
+        self.assertEqual(recorded['target_end'] - recorded['target_start'], 300)
+        self.assertEqual(output.getvalue(), '')
 
     def test_cached_and_fresh_entrypoints_save_all_forecast_windows(self):
         for script in ('enhanced_prediction', 'priceprediction'):
